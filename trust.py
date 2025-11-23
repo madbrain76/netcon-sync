@@ -264,7 +264,7 @@ def interactive_trust_server_cert(hostname: str, port: int = 443) -> bool:
     
     # Check if certificate is already trusted
     if is_cert_trusted(hostname, port):
-        print(f"✓ Certificate for {hostname}:{port} is already trusted.")
+        print(f"[OK] Certificate for {hostname}:{port} is already trusted.")
         return True
     
     try:
@@ -292,7 +292,7 @@ def interactive_trust_server_cert(hostname: str, port: int = 443) -> bool:
         
         # Import the certificate
         nickname = import_server_cert(hostname, port)
-        print(f"\n✓ Certificate imported as '{nickname}' and added to trusted store.")
+        print(f"\n[OK] Certificate imported as '{nickname}' and added to trusted store.")
         return True
         
     except Exception as e:
@@ -323,7 +323,7 @@ def format_nss_error(server_name: str, server_url: str, error: Exception, prog_n
         error_code = error_str.split(")")[0].strip("(") if "(" in error_str else "UNKNOWN"
         
         message = f"""
-❌ CERTIFICATE ERROR: {server_name}
+ERROR: CERTIFICATE NOT TRUSTED: {server_name}
 
 URL: {server_url}
 Error: {error_str}
@@ -367,12 +367,12 @@ def handle_trust_ca_cert(cert_path: str) -> None:
     try:
         nickname, was_newly_imported = import_ca_cert(cert_path)
         if was_newly_imported:
-            print(f"✓ CA certificate imported as '{nickname}'")
+            print(f"[OK] CA certificate imported as '{nickname}'")
         else:
-            print(f"✓ CA certificate '{nickname}' is already imported.")
+            print(f"[OK] CA certificate '{nickname}' is already imported.")
         sys.exit(0)
     except Exception as e:
-        print(f"✗ Error: {e}", file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -392,7 +392,7 @@ def handle_trust_server_url(server_url: str) -> None:
         port = parsed.port or 443
         
         if not hostname:
-            print(f"✗ Invalid URL: {server_url}", file=sys.stderr)
+            print(f"ERROR: Invalid URL: {server_url}", file=sys.stderr)
             sys.exit(1)
         
         # Let trust module handle all PKI details and user interaction
@@ -401,5 +401,5 @@ def handle_trust_server_url(server_url: str) -> None:
         else:
             sys.exit(1)
     except Exception as e:
-        print(f"✗ Error: {e}", file=sys.stderr)
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

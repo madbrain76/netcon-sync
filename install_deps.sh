@@ -21,7 +21,7 @@ if ! apt list --installed 2>/dev/null | grep -q "python3-venv"; then
 fi
 
 if ! apt list --installed 2>/dev/null | grep -q "libnss3-tools"; then
-    MISSING_PACKAGES="$MISSING_PACKAGES nss-tools"
+    MISSING_PACKAGES="$MISSING_PACKAGES libnss3-tools"
 fi
 
 if ! apt list --installed 2>/dev/null | grep -q "libnss3"; then

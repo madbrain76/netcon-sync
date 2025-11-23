@@ -31,17 +31,26 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import nss.error
 
-# Import shared modules
+# Import shared modules - config might fail if env vars are missing
+UNIFI_NETWORK_URL = None
+UNIFI_SITE_ID = None
+_config_error = None
+
 try:
     import unifi_utils
     from config import UNIFI_NETWORK_URL, UNIFI_SITE_ID
-    from trust import handle_trust_server_url, format_nss_error
+    from trust import handle_trust_server_url, handle_trust_ca_cert, format_nss_error
     from urllib.parse import urlparse
 except ModuleNotFoundError as e:
-    print(f"❌ Missing required dependency: {e}")
+    print(f"ERROR: Missing required dependency: {e}")
     print("\nPlease run the setup script:")
     print("  ./install_deps.sh")
     sys.exit(1)
+except ValueError as e:
+    # Store config error - we'll show help + error in main()
+    _config_error = e
+    UNIFI_NETWORK_URL = None
+    UNIFI_SITE_ID = None
 
 # ==============================================================================
 # COLUMN SCHEMAS - Centralized column definitions for clients and APs
@@ -664,6 +673,52 @@ def handle_forget_action_batch(clients: list):
         print(f"Error during batch forget operation: {e}")
     print("Batch forget command has been issued to the controller.")
 
+def print_action_results_table(clients_data: list, action_type: str, results: dict):
+    """
+    Prints a formatted table of action results (lock, unlock, reconnect, etc.)
+    
+    Args:
+        clients_data: List of client dicts
+        action_type: Type of action ('reconnect', 'lock', 'unlock', 'block', 'unblock')
+        results: Dict mapping MAC address to success (True/False)
+    """
+    # Build display rows
+    rows = []
+    for client in clients_data:
+        mac = client.get("mac", "N/A").lower() if client.get("mac") else "N/A"
+        friendly_name = client.get("name") or "Unknown"
+        success = results.get(mac, False)
+        status_symbol = "OK" if success else "FAIL"
+        rows.append({
+            "name": friendly_name,
+            "mac": mac,
+            "status": status_symbol
+        })
+    
+    if not rows:
+        return
+    
+    # Calculate column widths
+    name_width = max(len("Device Name"), max(len(row["name"]) for row in rows))
+    mac_width = max(len("MAC Address"), 17)
+    status_width = max(len("Result"), len("OK"))
+    
+    # Print header
+    print()
+    total_width = name_width + mac_width + status_width + 8
+    print("-" * total_width)
+    header_line = f"{'Device Name':<{name_width}}  {'MAC Address':<{mac_width}}  {'Result':<{status_width}}"
+    print(header_line)
+    print("-" * total_width)
+    
+    # Print data rows
+    for row in rows:
+        data_line = f"{row['name']:<{name_width}}  {row['mac']:<{mac_width}}  {row['status']:<{status_width}}"
+        print(data_line)
+    
+    print("-" * total_width)
+    print()
+
 def print_clients_table(clients_data: list, enabled_columns: list):
     """
     Prints a formatted table of client data based on enabled columns.
@@ -943,7 +998,7 @@ class HelpArgumentParser(argparse.ArgumentParser):
     """Custom ArgumentParser that shows full help page on invalid arguments."""
     def error(self, message):
         """Override error to print help page instead of just error message."""
-        sys.stderr.write(f"❌ Error: {message}\n\n")
+        sys.stderr.write(f"ERROR: {message}\n\n")
         self.print_help(sys.stderr)
         sys.exit(2)
 
@@ -977,21 +1032,58 @@ if __name__ == "__main__":
         print(f"Error initializing NSS: {e}", file=sys.stderr)
         sys.exit(1)
     
+    # Check for config errors from import phase
+    if _config_error:
+        print(f"ERROR: Configuration Error: {_config_error}", file=sys.stderr)
+        print("\nTo fix this, set the required environment variables:", file=sys.stderr)
+        print("  export UNIFI_NETWORK_URL='https://your-unifi-host:8443'", file=sys.stderr)
+        print("  export UNIFI_USERNAME='your-username'", file=sys.stderr)
+        print("  export UNIFI_PASSWORD='your-password'", file=sys.stderr)
+        print("  export UNIFI_SITE_ID='default'  # (optional, defaults to 'default')", file=sys.stderr)
+        print("\nThen run your command again.", file=sys.stderr)
+        sys.exit(1)
+    
     # Reminder about backup before any modifications
     if len(sys.argv) > 1 and sys.argv[1] not in ("--help", "-h", "trust"):
-        print("⚠️  REMINDER: Please backup your UniFi configuration before making changes!")
+        print("WARNING: Please backup your UniFi configuration before making changes!")
         print("   Use UniFi's built-in backup feature in System Settings > Backup & Restore")
         print()
     
     # Handle "trust" command first (non-standard argument parsing)
     if len(sys.argv) > 1 and sys.argv[1] == "trust":
         if len(sys.argv) < 3:
-            print("Usage: unifi_climgr.py trust <HTTPS_URL>")
-            print("\nExample: unifi_climgr.py trust https://192.168.1.100:8443")
+            print("Usage: unifi_climgr.py trust (--ca <CERT_PATH> | --server <HTTPS_URL>)")
+            print()
+            print("Examples:")
+            print("  # Trust a CA certificate")
+            print("  unifi_climgr.py trust --ca /path/to/rootCA.pem")
+            print()
+            print("  # Trust a server certificate (with interactive verification)")
+            print("  unifi_climgr.py trust --server https://192.168.1.100:8443")
             sys.exit(1)
         
-        cert_url = sys.argv[2]
-        handle_trust_server_url(cert_url)
+        # Parse trust command options
+        if sys.argv[2] == "--ca":
+            if len(sys.argv) < 4:
+                print("ERROR: --ca requires a certificate path")
+                sys.exit(1)
+            cert_path = sys.argv[3]
+            handle_trust_ca_cert(cert_path)
+        elif sys.argv[2] == "--server":
+            if len(sys.argv) < 4:
+                print("ERROR: --server requires a URL")
+                sys.exit(1)
+            server_url = sys.argv[3]
+            handle_trust_server_url(server_url)
+        else:
+            # For backwards compatibility: trust <URL> (without --server flag)
+            # Only if it looks like a URL (contains ://)
+            if "://" in sys.argv[2]:
+                handle_trust_server_url(sys.argv[2])
+            else:
+                print(f"ERROR: Invalid trust option: {sys.argv[2]}")
+                print("Use either --ca <CERT_PATH> or --server <HTTPS_URL>")
+                sys.exit(1)
     
     # Separate column switches from other arguments BEFORE passing to argparse
     # Accept CLIENT, AP, and SSID columns, validation happens per-action later
@@ -1778,9 +1870,9 @@ EXAMPLES:
                         if ap_mac:
                             print(f"  {ap_name}... ", end="", flush=True)
                             if unifi_utils.restart_ap(ap_mac):
-                                print("✓")
+                                print("[OK]")
                             else:
-                                print("✗")
+                                print("[FAIL]")
                     
                     # Add 5-second delay between layers (but not after the last layer)
                     if i < len(sorted_depths) - 1:
@@ -1798,9 +1890,9 @@ EXAMPLES:
                     if ap_mac:
                         print(f"  {ap_name}... ", end="")
                         if unifi_utils.restart_ap(ap_mac):
-                            print("✓")
+                            print("[OK]")
                         else:
-                            print("✗")
+                            print("[FAIL]")
             sys.exit(0)
         
         # =====================================================================
@@ -1839,9 +1931,9 @@ EXAMPLES:
                     is_enabled_before = "Yes" if ssid.get("enabled", False) else "No"
                     print(f"  {ssid_name} (enabled: {is_enabled_before} → ", end="", flush=True)
                     if unifi_utils.enable_ssid(ssid_name):
-                        print(f"Yes)... ✓")
+                        print(f"Yes)... [OK]")
                     else:
-                        print(f"?)... ✗")
+                        print(f"?)... [FAIL]")
                 sys.exit(0)
             
             elif args.aps:
@@ -1883,9 +1975,9 @@ EXAMPLES:
                     is_enabled_before = "Yes" if not ap.get("disabled", False) else "No"
                     print(f"  {ap_name} (enabled: {is_enabled_before} → ", end="", flush=True)
                     if unifi_utils.enable_ap(ap_mac):
-                        print(f"Yes)... ✓")
+                        print(f"Yes)... [OK]")
                     else:
-                        print(f"?)... ✗")
+                        print(f"?)... [FAIL]")
                 sys.exit(0)
         
         # =====================================================================
@@ -1924,9 +2016,9 @@ EXAMPLES:
                     is_enabled_before = "Yes" if ssid.get("enabled", False) else "No"
                     print(f"  {ssid_name} (enabled: {is_enabled_before} → ", end="", flush=True)
                     if unifi_utils.disable_ssid(ssid_name):
-                        print(f"No)... ✓")
+                        print(f"No)... [OK]")
                     else:
-                        print(f"?)... ✗")
+                        print(f"?)... [FAIL]")
                 sys.exit(0)
             
             elif args.aps:
@@ -1968,9 +2060,9 @@ EXAMPLES:
                     is_enabled_before = "Yes" if not ap.get("disabled", False) else "No"
                     print(f"  {ap_name} (enabled: {is_enabled_before} → ", end="", flush=True)
                     if unifi_utils.disable_ap(ap_mac):
-                        print(f"No)... ✓")
+                        print(f"No)... [OK]")
                     else:
-                        print(f"?)... ✗")
+                        print(f"?)... [FAIL]")
                 sys.exit(0)
         
         # =====================================================================
@@ -2046,82 +2138,62 @@ EXAMPLES:
                 target_desc = f"AP {args.ap_name}"
             else:  # connected_ap
                 print("Locking each client to its currently connected AP...")
+                results = {}
                 for client in filtered_clients:
                     mac = client.get("mac")
                     live_ap_mac = client.get("live_ap_mac")
                     if client.get("is_connected_live") and live_ap_mac and mac:
-                        ap_name = client.get("connected_ap_name", "N/A")
-                        is_locked_before = "Yes" if client.get("is_ap_locked", False) else "No"
-                        print(f"  {mac} (locked: {is_locked_before} → ", end="", flush=True)
-                        if unifi_utils.lock_client_to_ap(mac, live_ap_mac):
-                            print(f"Yes) → {ap_name}... ✓")
-                        else:
-                            print(f"?) → {ap_name}... ✗")
+                        results[mac.lower()] = unifi_utils.lock_client_to_ap(mac, live_ap_mac)
+                print_action_results_table(filtered_clients, "lock", results)
                 sys.exit(0)
             
             # Lock to specific AP
             print(f"Locking to {target_desc}...")
+            results = {}
             for client in filtered_clients:
                 mac = client.get("mac")
                 if mac:
-                    is_locked_before = "Yes" if client.get("is_ap_locked", False) else "No"
-                    print(f"  {mac} (locked: {is_locked_before} → ", end="", flush=True)
-                    if unifi_utils.lock_client_to_ap(mac, ap_mac):
-                        print(f"Yes)... ✓")
-                    else:
-                        print(f"?)... ✗")
+                    results[mac.lower()] = unifi_utils.lock_client_to_ap(mac, ap_mac)
+            print_action_results_table(filtered_clients, "lock", results)
         
         elif args.action == 'unlock_client':
             print("Unlocking clients...")
+            results = {}
             for client in filtered_clients:
                 mac = client.get("mac")
                 if mac:
-                    is_locked_before = "Yes" if client.get("is_ap_locked", False) else "No"
-                    print(f"  {mac} (locked: {is_locked_before} → ", end="", flush=True)
-                    if unifi_utils.unlock_client_from_ap(mac):
-                        print(f"No)... ✓")
-                    else:
-                        print(f"?)... ✗")
+                    results[mac.lower()] = unifi_utils.unlock_client_from_ap(mac)
+            print_action_results_table(filtered_clients, "unlock", results)
         
         elif args.action == 'reconnect_client':
             print("Reconnecting clients...")
+            results = {}
             for client in filtered_clients:
                 mac = client.get("mac")
                 if mac:
-                    print(f"  {mac}... ", end="")
-                    if unifi_utils.reconnect_client(mac):
-                        print("✓")
-                    else:
-                        print("✗")
+                    results[mac.lower()] = unifi_utils.reconnect_client(mac)
+            print_action_results_table(filtered_clients, "reconnect", results)
         
         elif args.action == 'forget':
             handle_forget_action_batch(filtered_clients)
         
         elif args.action == 'block_client':
             print("Blocking clients...")
+            results = {}
             for client in filtered_clients:
                 mac = client.get("mac")
                 if mac:
-                    # Check if client is currently blocked
-                    is_blocked_before = "Yes" if client.get("blocked", False) else "No"
-                    print(f"  {mac} (blocked: {is_blocked_before} → ", end="", flush=True)
-                    if unifi_utils.block_client(mac):
-                        print(f"Yes)... ✓")
-                    else:
-                        print(f"?)... ✗")
+                    results[mac.lower()] = unifi_utils.block_client(mac)
+            print_action_results_table(filtered_clients, "block", results)
         
         elif args.action == 'unblock_client':
             print("Unblocking clients...")
+            results = {}
             for client in filtered_clients:
                 mac = client.get("mac")
                 if mac:
-                    # Check if client is currently blocked
-                    is_blocked_before = "Yes" if client.get("blocked", False) else "No"
-                    print(f"  {mac} (blocked: {is_blocked_before} → ", end="", flush=True)
-                    if unifi_utils.unblock_client(mac):
-                        print(f"No)... ✓")
-                    else:
-                        print(f"?)... ✗")
+                    results[mac.lower()] = unifi_utils.unblock_client(mac)
+            print_action_results_table(filtered_clients, "unblock", results)
 
     except nss.error.NSPRError as e:
         # Certificate validation error - provide helpful guidance
