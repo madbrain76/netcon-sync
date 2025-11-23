@@ -10,7 +10,7 @@ Currently supports pfSense router, and UniFi controllers. Includes DHCP reservat
 
 I maintain a very large smart home network, with hundreds of IOT devices. I use pfSense as a router rather than a Unifi gateway, and Ubiquiti Unifi access points, as many others do.
 The main reason I use pfSense is that my router is in my home office, and I need a 100% silent fanless 10 Gbase-t router. Ubiquiti does not produce one. Thus, I built my own fanless PC,
-with an AMD 5700G APU, X470 motherboard, NH-D15 CPU cooler, and X550-T2 dual 10 Gbase-t NIC. It has been my router for the last few years, and is completely silent.
+with an AMD 5700G APU, X470 motherboard, NH-D15S CPU cooler with fan removed, and X550-T2 dual 10 Gbase-t NIC. It has been my router for the last few years, and is completely silent.
 
 Given this split between pfSense and Unifi, I selected the "source of truth" for my clients as the DHCP reservation table in pfSense, specifically the MAC, IPv4 reservation, hostname, and description.
 
