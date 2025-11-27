@@ -923,3 +923,145 @@ def enable_ap(ap_mac: str) -> bool:
         
     except (Exception, json.JSONDecodeError):
         return False
+
+
+def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
+    """
+    Upgrades the firmware on an access point to the latest version available
+    for its configured firmware channel in the controller.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP to upgrade (e.g., "aa:bb:cc:dd:ee:ff").
+        dry_run (bool): If True, show what would be upgraded without actually upgrading.
+                       Defaults to False.
+    
+    Returns:
+        dict: A dictionary containing:
+            - "success" (bool): Whether the operation succeeded
+            - "current_version" (str): Current firmware version
+            - "new_version" (str): New firmware version (if available)
+            - "message" (str): Status message
+    """
+    if not ap_mac:
+        return {
+            "success": False,
+            "current_version": None,
+            "new_version": None,
+            "message": "No AP MAC address provided"
+        }
+    
+    try:
+        # Get all devices
+        devices = get_devices()
+        
+        # Find matching AP (case-insensitive MAC)
+        matching_ap = None
+        target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
+        for device in devices:
+            if device.get("type") == "uap":
+                device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
+                if device_mac == target_mac_lower:
+                    matching_ap = device
+                    break
+        
+        if not matching_ap:
+            return {
+                "success": False,
+                "current_version": None,
+                "new_version": None,
+                "message": f"AP with MAC {ap_mac} not found"
+            }
+        
+        # Extract current firmware version and AP name
+        current_version = matching_ap.get("firmware", "Unknown")
+        ap_name = matching_ap.get("name") or matching_ap.get("model", "Unnamed AP")
+        
+        # Get the firmware channel (default to "release" if not set)
+        firmware_channel = matching_ap.get("fw_channel") or matching_ap.get("update_channel", "release")
+        
+        # Fetch available firmware information from the controller
+        try:
+            firmware_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/firmware")
+        except Exception:
+            # If firmware endpoint doesn't work, try to get it from device endpoints
+            firmware_data = []
+        
+        # Find the latest firmware for this AP model/channel
+        device_model = matching_ap.get("model", "")
+        new_version = None
+        
+        if isinstance(firmware_data, list):
+            for fw in firmware_data:
+                fw_model = fw.get("model", "")
+                fw_channel = fw.get("channel", "release")
+                
+                # Match by model and channel
+                if fw_model == device_model and fw_channel == firmware_channel:
+                    new_version = fw.get("version")
+                    break
+        
+        # If we couldn't find firmware info from the controller, provide informational response
+        if not new_version:
+            if dry_run:
+                return {
+                    "success": True,
+                    "current_version": current_version,
+                    "new_version": "Unknown (not available from controller)",
+                    "message": f"[DRY RUN] {ap_name} ({ap_mac}): Would check for firmware updates on '{firmware_channel}' channel"
+                }
+            else:
+                return {
+                    "success": False,
+                    "current_version": current_version,
+                    "new_version": None,
+                    "message": f"No firmware information available for {ap_name} on '{firmware_channel}' channel"
+                }
+        
+        # Check if already on the latest version
+        if current_version == new_version:
+            return {
+                "success": True,
+                "current_version": current_version,
+                "new_version": new_version,
+                "message": f"{ap_name} is already on the latest firmware version {current_version}"
+            }
+        
+        # Handle dry run
+        if dry_run:
+            return {
+                "success": True,
+                "current_version": current_version,
+                "new_version": new_version,
+                "message": f"[DRY RUN] {ap_name} ({ap_mac}): Would upgrade from {current_version} to {new_version}"
+            }
+        
+        # Perform the actual firmware upgrade
+        endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/devmgr"
+        payload = {
+            "cmd": "upgrade",
+            "mac": ap_mac.lower()
+        }
+        
+        try:
+            _make_unifi_api_call("POST", endpoint, json=payload)
+            return {
+                "success": True,
+                "current_version": current_version,
+                "new_version": new_version,
+                "message": f"{ap_name} ({ap_mac}): Firmware upgrade initiated from {current_version} to {new_version}"
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "current_version": current_version,
+                "new_version": new_version,
+                "message": f"Failed to initiate firmware upgrade for {ap_name}: {e}"
+            }
+        
+    except (Exception, json.JSONDecodeError) as e:
+        return {
+            "success": False,
+            "current_version": None,
+            "new_version": None,
+            "message": f"Error during firmware upgrade operation: {e}"
+        }
