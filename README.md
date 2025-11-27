@@ -14,6 +14,13 @@ with an AMD 5700G APU, X470 motherboard, NH-D15S CPU cooler with fan removed, an
 
 Given this split between pfSense and Unifi, I selected the "source of truth" for my clients as the DHCP reservation table in pfSense, specifically the MAC, IPv4 reservation, hostname, and description.
 
+## Workflow I personally use this to manage my Wifi IOT clients together in pfSense and Unifi
+1. add them to the Wifi network using their respective app
+2. find them in DHCP leases in pfsense
+3. add IPv4 reservations, hostnames, and a detailed description, with the suffix "- Wifi"
+4. run pfsense2unifi sync
+5. clients are now in sync between both pfSense and Unifi GUIs
+
 ## Features
 
 - 🔄 **DHCP Sync** - Exports DHCP static mappings from pfSense to UniFi as known clients
@@ -126,12 +133,13 @@ Additional disclaimers:
 
 - This tool was almost entirely vibe-coded with waywardgeek's Code Rhapsody, with minimal supervision and human review.
 While I have been writing low-level C, C++ and assembly code, mainly in the field of enterprise security, for over 30 years. I can barely read Python, let alone write it. I'm comfortable using this tool in production in my own home. Please think thrice about using this tool in a business production environment. If you take that chance, I'd like to hear about it.
+- Tested only with WSL and Ubuntu-24.04, and Debian Bookworm on Raspberry Pi 4
 - Only U6-LR and NanoHD Unifi APs have been tested. Other Unifi APs, switches and gateways have not been tested, because I don't currently own any.
 - Tested only with pfSense+ 25.07.1, pfSense APIv2, and Unifi Network 9.5.21 GA
 - Not tested with Unifi OS
 
 ## Future plans
-- Integrate pfsense2smokeping
+- Integrate pfsense2smokeping, for device monitoring
 
 ## License
 
