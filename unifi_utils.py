@@ -973,25 +973,47 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
             }
         
         # Extract current firmware version and AP name
-        current_version = matching_ap.get("firmware", "Unknown")
+        # Try multiple field names for firmware version (UniFi uses "version" in device objects)
+        current_version = matching_ap.get("version") or matching_ap.get("firmware") or matching_ap.get("fw_version")
+        if not current_version:
+            current_version = "Unknown"
+        
         ap_name = matching_ap.get("name") or matching_ap.get("model", "Unnamed AP")
         
         # Get the firmware channel (default to "release" if not set)
         firmware_channel = matching_ap.get("fw_channel") or matching_ap.get("update_channel", "release")
         
+        # First, check if the device itself has the upgrade-to firmware version
+        # This field is populated by the UniFi controller when an upgrade is available
+        upgrade_to_firmware = matching_ap.get("upgrade_to_firmware")
+        
         # Fetch available firmware information from the controller
         try:
             firmware_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/firmware")
-        except Exception:
-            # If firmware endpoint doesn't work, try to get it from device endpoints
+        except Exception as e:
+            # If firmware endpoint doesn't work, use device's upgrade_to_firmware field instead
             firmware_data = []
         
         # Find the latest firmware for this AP model/channel
         device_model = matching_ap.get("model", "")
         new_version = None
         
-        if isinstance(firmware_data, list):
-            for fw in firmware_data:
+        # Handle different response formats from firmware endpoint
+        if isinstance(firmware_data, dict):
+            # Sometimes firmware_data might be wrapped differently
+            if "_id" in firmware_data:
+                # Single firmware entry
+                firmware_list = [firmware_data]
+            else:
+                firmware_list = firmware_data.get("firmware", []) if isinstance(firmware_data, dict) else []
+        elif isinstance(firmware_data, list):
+            firmware_list = firmware_data
+        else:
+            firmware_list = []
+        
+        # Try to find matching firmware by model and channel
+        if firmware_list:
+            for fw in firmware_list:
                 fw_model = fw.get("model", "")
                 fw_channel = fw.get("channel", "release")
                 
@@ -1000,7 +1022,12 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
                     new_version = fw.get("version")
                     break
         
-        # If we couldn't find firmware info from the controller, provide informational response
+        # If we couldn't find firmware info from the controller, try using device's upgrade_to_firmware field
+        # This field is populated by UniFi when an upgrade is available
+        if not new_version and upgrade_to_firmware:
+            new_version = upgrade_to_firmware
+        
+        # If we still couldn't find firmware info from the controller, provide informational response
         if not new_version:
             if dry_run:
                 return {
@@ -1014,7 +1041,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
                     "success": False,
                     "current_version": current_version,
                     "new_version": None,
-                    "message": f"No firmware information available for {ap_name} on '{firmware_channel}' channel"
+                    "message": f"No firmware information available for {ap_name} (model:{device_model}) on '{firmware_channel}' channel"
                 }
         
         # Check if already on the latest version

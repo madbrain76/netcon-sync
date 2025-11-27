@@ -1222,6 +1222,16 @@ AVAILABLE ACTIONS:
               If neither --ap_mac nor --ap_name is specified, restarts all APs (use with caution!)
               For mesh networks, APs restart in mesh order (leaf to parent) with 5s delay between layers
 
+  upgrade_ap  Upgrade AP firmware to latest available version on configured channel
+              Usage: upgrade_ap [--ap_mac <MAC> | --ap_name <NAME>] [--actual_upgrade]
+              Options:
+                --ap_mac <MAC>         Upgrade AP by MAC address
+                --ap_name <NAME>       Upgrade AP by name
+                --actual_upgrade       Actually perform the upgrade (default is dry run)
+              If neither --ap_mac nor --ap_name is specified, upgrades all APs!
+              For mesh networks, APs upgrade in mesh order (leaf to parent) with 5s delay between layers
+              Default behavior is DRY RUN (shows what would be upgraded without making changes)
+
   enable      Enable wireless networks (SSIDs) or access points (APs)
               Usage: enable (--ssids | --aps) [<NAME> | --filter_name <NAME>] [--filter_mac <MAC>]
               Options:
@@ -1297,6 +1307,21 @@ EXAMPLES:
 
   # Restart all APs (WARNING: network disruption! Mesh networks restart in order)
   ./unifi_climgr.py restart_ap
+
+  # Dry run: preview what firmware updates would be applied (default behavior)
+  ./unifi_climgr.py upgrade_ap --ap_mac aa:bb:cc:dd:ee:ff
+
+  # Dry run: preview upgrades for all APs (leaf to parent in mesh order)
+  ./unifi_climgr.py upgrade_ap
+
+  # Actually upgrade a specific AP
+  ./unifi_climgr.py upgrade_ap --ap_mac aa:bb:cc:dd:ee:ff --actual_upgrade
+
+  # Actually upgrade a specific AP by name
+  ./unifi_climgr.py upgrade_ap --ap_name "Living Room AP" --actual_upgrade
+
+  # Actually upgrade all APs (WARNING: network disruption! Mesh networks upgrade in order)
+  ./unifi_climgr.py upgrade_ap --actual_upgrade
 
   # Enable an SSID
   ./unifi_climgr.py enable --ssids "My WiFi Network"
@@ -1530,6 +1555,19 @@ EXAMPLES:
     restart_ap_target = restart_ap_parser.add_mutually_exclusive_group(required=False)
     restart_ap_target.add_argument('--ap_mac', type=str, help='Restart AP by MAC address')
     restart_ap_target.add_argument('--ap_name', type=str, help='Restart AP by name')
+
+    # ============================================================================
+    # UPGRADE_AP action
+    # ============================================================================
+    upgrade_ap_parser = subparsers.add_parser(
+        'upgrade_ap',
+        help='Upgrade AP firmware to latest available version on configured channel',
+        allow_abbrev=False
+    )
+    upgrade_ap_target = upgrade_ap_parser.add_mutually_exclusive_group(required=False)
+    upgrade_ap_target.add_argument('--ap_mac', type=str, help='Upgrade AP by MAC address')
+    upgrade_ap_target.add_argument('--ap_name', type=str, help='Upgrade AP by name')
+    upgrade_ap_parser.add_argument('--actual_upgrade', action='store_true', help='Actually perform the upgrade (default is dry run)')
 
     # ============================================================================
     # ENABLE action
@@ -1874,10 +1912,10 @@ EXAMPLES:
                             else:
                                 print("[FAIL]")
                     
-                    # Add 5-second delay between layers (but not after the last layer)
-                    if i < len(sorted_depths) - 1:
-                        print("  Waiting 5 seconds before next layer...\n")
-                        time.sleep(5)
+                    # Add 15-second delay between layers (but not after the last layer or in dry run mode)
+                    if i < len(sorted_depths) - 1 and not dry_run:
+                        print("  Waiting 15 seconds before next layer...\n")
+                        time.sleep(15)
                 
                 print("\nAll APs restarted in mesh order.")
             else:
@@ -1893,6 +1931,121 @@ EXAMPLES:
                             print("[OK]")
                         else:
                             print("[FAIL]")
+            sys.exit(0)
+        
+        # =====================================================================
+        # UPGRADE_AP action
+        # =====================================================================
+        if args.action == 'upgrade_ap':
+            print("Fetching UniFi devices...")
+            all_devices = unifi_utils.get_devices()
+            aps = [device for device in all_devices if device.get("type") == "uap"]
+            
+            if not aps:
+                print("No Access Points found.")
+                sys.exit(0)
+            
+            aps_to_upgrade = []
+            
+            if args.ap_mac:
+                # Upgrade specific AP by MAC
+                target_mac = args.ap_mac.lower()
+                matching_aps = [ap for ap in aps if ap.get("mac", "").lower() == target_mac]
+                if not matching_aps:
+                    print(f"Error: No AP found with MAC {args.ap_mac}")
+                    sys.exit(1)
+                aps_to_upgrade = matching_aps
+            elif args.ap_name:
+                # Upgrade specific AP by name
+                matching_aps = [ap for ap in aps if (ap.get("name") or ap.get("model", "")).lower() == args.ap_name.lower()]
+                if not matching_aps:
+                    print(f"Error: No AP found with name '{args.ap_name}'")
+                    sys.exit(1)
+                aps_to_upgrade = matching_aps
+            else:
+                # Upgrade all APs
+                aps_to_upgrade = aps
+            
+            # Display the mesh topology before upgrading (only if more than one AP)
+            if len(aps_to_upgrade) > 1:
+                display_ap_tree(aps_to_upgrade, all_devices)
+            
+            # Check if there are any mesh APs (depth >= 1)
+            depths = calculate_ap_mesh_depths(aps_to_upgrade)
+            has_mesh_aps = any(depth >= 1 for depth in depths.values())
+            
+            # Use mesh-ordered upgrade if there are mesh APs and we're upgrading all APs (not a specific one)
+            use_mesh_order = (has_mesh_aps and not args.ap_mac and not args.ap_name)
+            
+            dry_run = not args.actual_upgrade  # Default is dry run
+            mode_str = "[ACTUAL]" if args.actual_upgrade else "[DRY RUN]"
+            
+            if use_mesh_order and not args.ap_mac and not args.ap_name:
+                import time
+                print(f"\n{mode_str} Upgrading {len(aps_to_upgrade)} AP(s) in mesh order (leaf to parent)...\n")
+                
+                # Group APs by depth
+                aps_by_depth = defaultdict(list)
+                for ap in aps_to_upgrade:
+                    ap_mac = ap.get("mac")
+                    depth = depths.get(ap_mac, -1)
+                    aps_by_depth[depth].append(ap)
+                
+                # Sort depths (deepest/highest numbers first, which means leaf to parent)
+                sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
+                
+                for i, depth in enumerate(sorted_depths):
+                    layer_aps = aps_by_depth[depth]
+                    
+                    if depth == -1:
+                        depth_label = "Orphan"
+                    elif depth == 0:
+                        depth_label = "Wired Root"
+                    else:
+                        depth_label = f"Mesh Depth {depth}"
+                    
+                    print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
+                    
+                    for ap in layer_aps:
+                        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                        ap_mac = ap.get("mac")
+                        if ap_mac:
+                            result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=dry_run)
+                            if result['success']:
+                                current = result.get('current_version', 'Unknown')
+                                new = result.get('new_version', 'Unknown')
+                                print(f"  {ap_name}... ", end="", flush=True)
+                                if result.get('new_version') and result['current_version'] != result['new_version']:
+                                    print(f"{current} → {new} [OK]")
+                                else:
+                                    print(f"{current} (already latest) [OK]")
+                            else:
+                                print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
+                    
+                    # Add 15-second delay between layers (but not after the last layer or in dry run mode)
+                    if i < len(sorted_depths) - 1 and not dry_run:
+                        print("  Waiting 15 seconds before next layer...\n")
+                        time.sleep(15)
+                
+                print(f"\n{mode_str} All APs processed.")
+            else:
+                # Standard upgrade without mesh ordering
+                print(f"\n{mode_str} Upgrading {len(aps_to_upgrade)} AP(s)...")
+                for ap in aps_to_upgrade:
+                    ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                    ap_mac = ap.get("mac")
+                    if ap_mac:
+                        result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=dry_run)
+                        if result['success']:
+                            current = result.get('current_version', 'Unknown')
+                            new = result.get('new_version', 'Unknown')
+                            print(f"  {ap_name}... ", end="")
+                            if result.get('new_version') and result['current_version'] != result['new_version']:
+                                print(f"{current} → {new} [OK]")
+                            else:
+                                print(f"{current} (already latest) [OK]")
+                        else:
+                            print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
             sys.exit(0)
         
         # =====================================================================
