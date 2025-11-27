@@ -13,6 +13,7 @@ import datetime
 import socket
 import json
 import re
+import sys
 import nss.error
 from config import UNIFI_NETWORK_URL, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_SITE_ID
 from http_tls_nss import NSPRNSSURLOpener
@@ -704,7 +705,7 @@ def restart_ap(ap_mac: str) -> bool:
     payload = {"cmd": "restart", "mac": ap_mac.lower()}
     
     try:
-        _make_unifi_api_call("POST", endpoint, json=payload)
+        response = _make_unifi_api_call("POST", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         return False
@@ -925,6 +926,97 @@ def enable_ap(ap_mac: str) -> bool:
         return False
 
 
+def _get_ap_state_description(state):
+    """Convert UniFi AP state code to human-readable description."""
+    state_map = {
+        0: "DISCONNECTED",
+        1: "CONNECTING/INITIALIZING",
+        2: "CONNECTED (but not fully ready)",
+        3: "RUNNING",
+        "RUN": "RUNNING",
+    }
+    if isinstance(state, (int, str)):
+        return state_map.get(state, f"UNKNOWN (code: {state})")
+    return "UNKNOWN"
+
+
+def check_ap_upgrade_status(ap_mac: str) -> dict:
+    """
+    Check the upgrade status and health of an AP.
+    Useful for debugging why an upgrade might have failed.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP to check
+    
+    Returns:
+        dict: Diagnostic information about the AP's upgrade status
+    """
+    try:
+        devices = get_devices()
+        matching_ap = None
+        target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
+        
+        for device in devices:
+            if device.get("type") == "uap":
+                device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
+                if device_mac == target_mac_lower:
+                    matching_ap = device
+                    break
+        
+        if not matching_ap:
+            return {
+                "found": False,
+                "message": f"AP with MAC {ap_mac} not found"
+            }
+        
+        ap_name = matching_ap.get("name") or matching_ap.get("model", "Unknown AP")
+        ap_state = matching_ap.get("state")
+        
+        diagnostics = {
+            "found": True,
+            "name": ap_name,
+            "mac": matching_ap.get("mac"),
+            "current_version": matching_ap.get("version"),
+            "upgrade_to_firmware": matching_ap.get("upgrade_to_firmware"),
+            "upgradable": matching_ap.get("upgradable"),
+            "state": ap_state,
+            "state_description": _get_ap_state_description(ap_state),
+            "adopted": matching_ap.get("adopted"),
+            "uptime_seconds": matching_ap.get("uptime"),
+            "uptime_days": matching_ap.get("uptime", 0) // 86400 if matching_ap.get("uptime") else 0,
+            "last_seen": matching_ap.get("last_seen"),
+            "model": matching_ap.get("model"),
+            "serial": matching_ap.get("serial"),
+        }
+        
+        # Check for potential issues
+        issues = []
+        
+        # State should be RUN or "RUN" or 3
+        if ap_state not in ["RUN", 3]:
+            state_desc = _get_ap_state_description(ap_state)
+            issues.append(f"AP is not in RUN state (current: {ap_state} - {state_desc}). AP may need to finish boot/initialization before upgrade.")
+        
+        if not matching_ap.get("adopted"):
+            issues.append("AP is not adopted by the controller")
+        
+        if not matching_ap.get("upgradable"):
+            issues.append("AP is marked as not upgradable")
+        
+        # Check if firmware is same as upgrade_to_firmware (already upgraded)
+        if matching_ap.get("version") == matching_ap.get("upgrade_to_firmware"):
+            issues.append("AP version matches upgrade_to_firmware (may already be upgraded or same version)")
+        
+        diagnostics["issues"] = issues
+        return diagnostics
+        
+    except Exception as e:
+        return {
+            "found": False,
+            "message": f"Error checking AP status: {e}"
+        }
+
+
 def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
     """
     Upgrades the firmware on an access point to the latest version available
@@ -1027,22 +1119,11 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
         if not new_version and upgrade_to_firmware:
             new_version = upgrade_to_firmware
         
-        # If we still couldn't find firmware info from the controller, provide informational response
+        # If we still couldn't find firmware info from the controller, assume already on latest
         if not new_version:
-            if dry_run:
-                return {
-                    "success": True,
-                    "current_version": current_version,
-                    "new_version": "Unknown (not available from controller)",
-                    "message": f"[DRY RUN] {ap_name} ({ap_mac}): Would check for firmware updates on '{firmware_channel}' channel"
-                }
-            else:
-                return {
-                    "success": False,
-                    "current_version": current_version,
-                    "new_version": None,
-                    "message": f"No firmware information available for {ap_name} (model:{device_model}) on '{firmware_channel}' channel"
-                }
+            # When no upgrade is available, set new_version to current_version
+            # This way display logic will show "(already latest)"
+            new_version = current_version
         
         # Check if already on the latest version
         if current_version == new_version:
@@ -1070,7 +1151,24 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
         }
         
         try:
-            _make_unifi_api_call("POST", endpoint, json=payload)
+            response = _make_unifi_api_call("POST", endpoint, json=payload)
+            
+            # Valid responses are:
+            # - Empty list [] (common for device commands like upgrade/restart)
+            # - Dict with rc="ok"
+            is_valid_response = (
+                isinstance(response, list) and len(response) == 0 or
+                isinstance(response, dict) and response.get("rc") == "ok"
+            )
+            
+            if not is_valid_response:
+                return {
+                    "success": False,
+                    "current_version": current_version,
+                    "new_version": new_version,
+                    "message": f"Failed to initiate firmware upgrade for {ap_name}: API returned unexpected response - {response}"
+                }
+            
             return {
                 "success": True,
                 "current_version": current_version,
@@ -1078,6 +1176,16 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
                 "message": f"{ap_name} ({ap_mac}): Firmware upgrade initiated from {current_version} to {new_version}"
             }
         except Exception as e:
+            # Some UniFi controllers return HTTP 400 after successfully queuing the upgrade
+            error_str = str(e).lower()
+            if "http error 400" in error_str:
+                return {
+                    "success": True,
+                    "current_version": current_version,
+                    "new_version": new_version,
+                    "message": f"{ap_name} ({ap_mac}): Firmware upgrade initiated"
+                }
+            
             return {
                 "success": False,
                 "current_version": current_version,

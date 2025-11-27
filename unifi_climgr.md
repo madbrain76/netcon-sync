@@ -7,7 +7,7 @@ Command-line interface for comprehensive UniFi network management operations.
 UniFi Network application is GUI-based and not suited for batch operations. This CLI tool provides advanced management capabilities for UniFi clients and access points, including:
 
 - Batch client disconnect/kick operations
-- AP mesh topology visualization (ASCII art)
+- AP mesh topology visualization
 - AP restart sequencing in proper mesh order
 - Mesh recovery after power outages
 - Client connectivity improvements via forced roaming

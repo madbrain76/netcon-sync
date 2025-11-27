@@ -507,7 +507,7 @@ def display_ap_tree(aps: list, all_devices: list):
     Displays the AP network as a tree structure showing mesh topology.
     """
     print("\n" + "="*80)
-    print("## AP Network Tree View (ASCII)")
+    print("## AP Network Tree View")
     print("="*80 + "\n")
     
     ap_by_mac = {ap['mac']: ap for ap in aps if 'mac' in ap}
@@ -1570,6 +1570,18 @@ EXAMPLES:
     upgrade_ap_parser.add_argument('--actual_upgrade', action='store_true', help='Actually perform the upgrade (default is dry run)')
 
     # ============================================================================
+    # CHECK_AP action (diagnostic)
+    # ============================================================================
+    check_ap_parser = subparsers.add_parser(
+        'check_ap',
+        help='Check AP status and diagnose upgrade issues',
+        allow_abbrev=False
+    )
+    check_ap_target = check_ap_parser.add_mutually_exclusive_group(required=True)
+    check_ap_target.add_argument('--ap_mac', type=str, help='Check AP by MAC address')
+    check_ap_target.add_argument('--ap_name', type=str, help='Check AP by name')
+
+    # ============================================================================
     # ENABLE action
     # ============================================================================
     enable_parser = subparsers.add_parser(
@@ -2021,6 +2033,10 @@ EXAMPLES:
                                     print(f"{current} (already latest) [OK]")
                             else:
                                 print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
+                            
+                            # Add 5-second delay after each upgrade initiation in actual mode
+                            if not dry_run:
+                                time.sleep(5)
                     
                     # Add 15-second delay between layers (but not after the last layer or in dry run mode)
                     if i < len(sorted_depths) - 1 and not dry_run:
@@ -2046,6 +2062,88 @@ EXAMPLES:
                                 print(f"{current} (already latest) [OK]")
                         else:
                             print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
+                        
+                        # Add 5-second delay after each upgrade initiation in actual mode
+                        if not dry_run:
+                            time.sleep(5)
+            sys.exit(0)
+        
+        # =====================================================================
+        # CHECK_AP action (diagnostic)
+        # =====================================================================
+        if args.action == 'check_ap':
+            ap_mac = None
+            ap_name = None
+            
+            if args.ap_mac:
+                ap_mac = args.ap_mac
+            elif args.ap_name:
+                ap_name = args.ap_name
+            
+            # Get AP info
+            print("Fetching UniFi devices...")
+            all_devices = unifi_utils.get_devices()
+            aps = [device for device in all_devices if device.get("type") == "uap"]
+            
+            matching_ap = None
+            if ap_mac:
+                # Find by MAC
+                target_mac = ap_mac.lower()
+                for ap in aps:
+                    if ap.get("mac", "").lower() == target_mac:
+                        matching_ap = ap
+                        break
+            elif ap_name:
+                # Find by name
+                for ap in aps:
+                    if (ap.get("name") or ap.get("model", "")).lower() == ap_name.lower():
+                        matching_ap = ap
+                        break
+            
+            if not matching_ap:
+                print(f"Error: No AP found with {'MAC' if ap_mac else 'name'} {ap_mac or ap_name}")
+                sys.exit(1)
+            
+            # Use the diagnostic function
+            status = unifi_utils.check_ap_upgrade_status(matching_ap.get("mac"))
+            
+            if status.get("found"):
+                print(f"\n=== {status.get('name')} Status ===")
+                print(f"MAC: {status.get('mac')}")
+                print(f"Model: {status.get('model')}")
+                print(f"Serial: {status.get('serial')}")
+                print(f"Current Version: {status.get('current_version')}")
+                print(f"Upgrade Available: {status.get('upgrade_to_firmware')}")
+                print(f"Upgradable: {status.get('upgradable')}")
+                print(f"State: {status.get('state')} ({status.get('state_description')})")
+                print(f"Adopted: {status.get('adopted')}")
+                print(f"Uptime: {status.get('uptime_days')} days")
+                print(f"Last Seen: {status.get('last_seen')}")
+                
+                if status.get("issues"):
+                    print(f"\n⚠️  Issues found:")
+                    for issue in status.get("issues"):
+                        print(f"  - {issue}")
+                    
+                    print(f"\n💡 Recommendations:")
+                    state = status.get('state')
+                    if state in [1, "CONNECTING/INITIALIZING"]:
+                        print(f"  - The AP is in INITIALIZING state, possibly stuck")
+                        print(f"  - Try restarting the AP with: ./unifi_climgr.py restart_ap --ap_name 'Office'")
+                        print(f"  - Wait for it to fully boot (state should change to RUN)")
+                        print(f"  - Then retry the upgrade")
+                    if not status.get('upgradable'):
+                        print(f"  - The AP is marked as not upgradable")
+                        print(f"  - This may indicate a hardware issue or incompatibility")
+                        print(f"  - Check UniFi controller logs for more details")
+                    if not status.get('adopted'):
+                        print(f"  - The AP is not adopted by the controller")
+                        print(f"  - You need to adopt it first before upgrading")
+                else:
+                    print("\n✓ No obvious issues detected")
+            else:
+                print(f"Error: {status.get('message')}")
+            
             sys.exit(0)
         
         # =====================================================================
