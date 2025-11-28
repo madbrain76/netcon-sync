@@ -622,108 +622,14 @@ def _build_ap_branch_aps(target_ap: dict, all_devices: list) -> list:
     
     return branch_aps
 
-def display_ap_tree(aps: list, all_devices: list):
+def display_ap_tree(aps: list, all_devices: list, show_macs: bool = True):
     """
     Displays the AP network as a tree structure showing mesh topology.
-    """
-    print("\n" + "="*80)
-    print("## AP Network Tree View")
-    print("="*80 + "\n")
     
-    ap_by_mac = {ap['mac']: ap for ap in aps if 'mac' in ap}
-    wired_roots = []
-    mesh_children_map = defaultdict(list)
-    printed_macs = set()
-    
-    # Classify APs as wired roots or mesh children
-    for ap in aps:
-        connection_type = 'N/A'
-        is_wired_status = ap.get('wired')
-        
-        if is_wired_status is True:
-            connection_type = 'wired'
-        elif is_wired_status is False:
-            connection_type = 'mesh'
-        else:
-            raw_uplink_type = ap.get('uplink', {}).get('type')
-            if raw_uplink_type == 'wire':
-                connection_type = 'wired'
-            elif raw_uplink_type in ['mesh', 'wireless']:
-                connection_type = 'mesh'
-        
-        if connection_type == 'wired':
-            wired_roots.append(ap)
-        elif connection_type == 'mesh':
-            uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
-            if uplink_mac and uplink_mac != 'N/A' and uplink_mac in ap_by_mac:
-                mesh_children_map[uplink_mac].append(ap)
-    
-    # Recursive function to print tree nodes
-    def _print_node_recursive(ap_node, prefix=""):
-        if ap_node['mac'] in printed_macs:
-            return
-        
-        node_name = ap_node.get('name') or ap_node.get('model', 'Unknown AP')
-        
-        if not prefix:  # Root node
-            print(f"{node_name} (Wired Uplink)")
-        else:
-            print(f"{prefix}{node_name}")
-        
-        printed_macs.add(ap_node['mac'])
-        
-        children = mesh_children_map.get(ap_node['mac'], [])
-        children.sort(key=lambda x: x.get('name', '').lower())
-        
-        for i, child in enumerate(children):
-            is_last = (i == len(children) - 1)
-            child_prefix_segment = "+-- " if is_last else "|-- "
-            
-            new_prefix = ""
-            if not prefix:  # Direct children of root
-                new_prefix = "  " + child_prefix_segment
-            else:
-                # Extend parent's prefix
-                if prefix.endswith("|-- "):
-                    new_prefix = prefix[:-4] + "|   " + child_prefix_segment
-                elif prefix.endswith("+-- "):
-                    new_prefix = prefix[:-4] + "    " + child_prefix_segment
-                else:
-                    new_prefix = prefix + child_prefix_segment
-            
-            _print_node_recursive(child, new_prefix)
-    
-    # Print the tree
-    wired_roots.sort(key=lambda x: x.get('name', '').lower())
-    
-    if not wired_roots:
-        print("No wired APs found. Network topology might be entirely mesh.")
-    else:
-        for root_ap in wired_roots:
-            _print_node_recursive(root_ap)
-    
-    # Print orphan mesh APs
-    orphan_mesh_aps = [
-        ap for ap in aps
-        if ap.get('mac') not in printed_macs and ap.get('wired') is False and
-           (ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac'))
-    ]
-    
-    if orphan_mesh_aps:
-        print("\n---")
-        print("## Orphan Mesh APs (Uplink not traceable)")
-        print("---")
-        orphan_mesh_aps.sort(key=lambda x: x.get('name', '').lower())
-        for ap in orphan_mesh_aps:
-            ap_name = ap.get('name') or ap.get('model', 'Unknown AP')
-            uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac', 'N/A')
-            print(f"- {ap_name} (Uplink MAC: {uplink_mac})")
-    
-    print("\n" + "="*80)
-
-def display_ap_tree_with_macs(aps: list, all_devices: list):
-    """
-    Displays the AP network as a tree structure with names and MAC addresses.
+    Args:
+        aps: List of AP devices
+        all_devices: List of all devices (for reference)
+        show_macs: If True, display MAC addresses for each AP (default: True)
     """
     print("\n" + "="*80)
     print("## AP Network Tree View")
@@ -766,9 +672,15 @@ def display_ap_tree_with_macs(aps: list, all_devices: list):
         node_mac = ap_node.get('mac', 'N/A')
         
         if not prefix:  # Root node
-            print(f"{node_name} ({node_mac}) - Wired Uplink")
+            if show_macs:
+                print(f"{node_name} ({node_mac}) - Wired Uplink")
+            else:
+                print(f"{node_name} (Wired Uplink)")
         else:
-            print(f"{prefix}{node_name} ({node_mac})")
+            if show_macs:
+                print(f"{prefix}{node_name} ({node_mac})")
+            else:
+                print(f"{prefix}{node_name}")
         
         printed_macs.add(ap_node['mac'])
         
@@ -818,7 +730,10 @@ def display_ap_tree_with_macs(aps: list, all_devices: list):
             ap_name = ap.get('name') or ap.get('model', 'Unknown AP')
             ap_mac = ap.get('mac', 'N/A')
             uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac', 'N/A')
-            print(f"- {ap_name} ({ap_mac}), Uplink MAC: {uplink_mac}")
+            if show_macs:
+                print(f"- {ap_name} ({ap_mac}), Uplink MAC: {uplink_mac}")
+            else:
+                print(f"- {ap_name} (Uplink MAC: {uplink_mac})")
     
     print("\n" + "="*80)
 
@@ -985,7 +900,7 @@ def _wait_for_mesh_rebuild(aps_restarted: list, wait_for_mesh_rebuild: bool = Fa
             
             # Display the current topology tree after changes
             print("\nCurrent mesh topology:")
-            display_ap_tree_with_macs(aps_restarted, [])
+            display_ap_tree(aps_restarted, [])
         elif check_num % 60 == 0:
             # Report status every minute if topology not yet restored
             print(f"Waiting for mesh to rebuild ({check_num}s elapsed)...")
@@ -2575,8 +2490,8 @@ EXAMPLES:
                             else:
                                 print("[FAIL]")
                     
-                    # Add 15-second delay between layers (but not after the last layer or in dry run mode)
-                    if i < len(sorted_depths) - 1 and not dry_run:
+                    # Add 15-second delay between layers (but not after the last layer)
+                    if i < len(sorted_depths) - 1:
                         print("  Waiting 15 seconds before next layer...\n")
                         time.sleep(15)
                 
