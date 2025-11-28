@@ -622,14 +622,138 @@ def _build_ap_branch_aps(target_ap: dict, all_devices: list) -> list:
     
     return branch_aps
 
-def display_ap_tree(aps: list, all_devices: list, show_macs: bool = True):
+def serialize_ap_topology(aps: list) -> list:
+    """
+    Serialize AP topology to a simple list format for storage/transmission.
+    Each entry is a dict with: {mac, uplink_mac, name}
+    uplink_mac is None for wired root APs.
+    
+    Args:
+        aps: List of AP devices from UniFi
+    
+    Returns:
+        List of dicts: [{"mac": "xx:xx:...", "uplink_mac": "yy:yy:..." or None, "name": "AP Name"}, ...]
+    """
+    topology = []
+    
+    for ap in aps:
+        ap_mac = ap.get('mac', '').lower() if ap.get('mac') else None
+        if not ap_mac:
+            continue
+        
+        ap_name = ap.get('name') or ap.get('model', 'Unknown AP')
+        
+        # Determine if this is a wired root AP
+        is_wired = ap.get('wired') is True or ap.get('uplink', {}).get('type') == 'wire'
+        
+        if is_wired:
+            uplink_mac = None
+        else:
+            # Get uplink MAC for mesh APs
+            uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
+            if uplink_mac:
+                uplink_mac = uplink_mac.lower()
+        
+        topology.append({
+            'mac': ap_mac,
+            'uplink_mac': uplink_mac,
+            'name': ap_name
+        })
+    
+    return topology
+
+def deserialize_ap_topology(topology: list) -> list:
+    """
+    Deserialize AP topology from simple list format back to AP objects.
+    Each entry should be a dict with: {mac, uplink_mac, name}
+    
+    Args:
+        topology: List of dicts with AP topology data
+    
+    Returns:
+        List of AP dicts with minimal structure needed for display_ap_tree
+    """
+    aps = []
+    
+    for entry in topology:
+        if not isinstance(entry, dict):
+            continue
+        
+        mac = entry.get('mac', '').lower() if entry.get('mac') else None
+        name = entry.get('name', 'Unknown AP')
+        uplink_mac = entry.get('uplink_mac')
+        
+        if not mac:
+            continue
+        
+        # Build minimal AP object for tree display
+        ap_obj = {
+            'mac': mac,
+            'name': name,
+            'model': name,  # Fallback to name if no separate model field
+            'wired': uplink_mac is None,  # Root if no uplink
+            'uplink_ap_mac': uplink_mac,
+            'uplink': {
+                'type': 'wire' if uplink_mac is None else 'mesh'
+            }
+        }
+        
+        aps.append(ap_obj)
+    
+    return aps
+
+def ap_topology_to_json(aps: list) -> str:
+    """
+    Serialize AP topology to JSON string.
+    
+    Args:
+        aps: List of AP devices from UniFi
+    
+    Returns:
+        JSON string representing the topology
+    """
+    topology = serialize_ap_topology(aps)
+    return json.dumps(topology, indent=2)
+
+def ap_topology_from_json(json_str: str) -> list:
+    """
+    Deserialize AP topology from JSON string back to AP objects.
+    
+    Args:
+        json_str: JSON string containing AP topology
+    
+    Returns:
+        List of AP objects ready for display_ap_tree
+    """
+    try:
+        topology = json.loads(json_str)
+        if not isinstance(topology, list):
+            return []
+        return deserialize_ap_topology(topology)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True):
     """
     Displays the AP network as a tree structure showing mesh topology.
     
     Args:
-        aps: List of AP devices
-        all_devices: List of all devices (for reference)
+        aps: List of AP devices. Can be either:
+            - Live AP data from UniFi (with fields: mac, name, wired, uplink_ap_mac, etc.)
+            - Deserialized AP topology from deserialize_ap_topology()
+        all_devices: List of all devices (optional, for reference)
         show_macs: If True, display MAC addresses for each AP (default: True)
+    
+    Examples:
+        # Display from live UniFi data
+        aps = unifi_utils.get_devices()
+        display_ap_tree(aps, all_devices=aps)
+        
+        # Display from serialized topology
+        topology = serialize_ap_topology(live_aps)
+        # ... later, restore and display
+        deserialized_aps = deserialize_ap_topology(topology)
+        display_ap_tree(deserialized_aps, show_macs=True)
     """
     print("\n" + "="*80)
     print("## AP Network Tree View")
@@ -2145,6 +2269,21 @@ EXAMPLES:
     check_ap_target.add_argument('--ap_name', type=str, help='Check AP by name')
 
     # ============================================================================
+    # SAVE_TOPOLOGY action (export current mesh topology)
+    # ============================================================================
+    save_topology_parser = subparsers.add_parser(
+        'save_topology',
+        help='Export current AP mesh topology to JSON file',
+        allow_abbrev=False
+    )
+    save_topology_parser.add_argument(
+        'filename',
+        nargs='?',
+        default=None,
+        help='JSON file to save topology to (default: ~/.netcon-sync/topology.json)'
+    )
+
+    # ============================================================================
     # ENABLE action
     # ============================================================================
     enable_parser = subparsers.add_parser(
@@ -2935,6 +3074,60 @@ EXAMPLES:
                 print(f"Error: {status.get('message')}")
             
             sys.exit(0)
+        
+        # =====================================================================
+        # SAVE_TOPOLOGY action (export current mesh topology to JSON)
+        # =====================================================================
+        if args.action == 'save_topology':
+            # Determine output filename
+            if args.filename:
+                output_file = os.path.expanduser(args.filename)
+            else:
+                # Default: ~/.netcon-sync/topology.json
+                output_file = os.path.expanduser("~/.netcon-sync/topology.json")
+            
+            # Create directory if it doesn't exist
+            output_dir = os.path.dirname(output_file)
+            if output_dir and not os.path.exists(output_dir):
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                except (OSError, PermissionError) as e:
+                    print(f"Error: Failed to create directory {output_dir}: {e}")
+                    sys.exit(1)
+            
+            # Fetch current APs from UniFi
+            print("Fetching current AP mesh topology from UniFi controller...")
+            all_devices = unifi_utils.get_devices()
+            aps = [device for device in all_devices if device.get("type") == "uap"]
+            
+            if not aps:
+                print("Error: No Access Points found.")
+                sys.exit(1)
+            
+            # Serialize topology to JSON
+            try:
+                json_str = ap_topology_to_json(aps)
+                
+                # Write to file
+                with open(output_file, 'w') as f:
+                    f.write(json_str)
+                
+                print(f"✓ Topology saved to: {output_file}")
+                print(f"  APs: {len(aps)}")
+                
+                # Show preview
+                topology = serialize_ap_topology(aps)
+                for entry in topology:
+                    uplink = entry['uplink_mac'] or 'WIRED'
+                    print(f"  - {entry['name']} ({entry['mac']}) → {uplink}")
+                
+                sys.exit(0)
+            except (IOError, OSError, PermissionError) as e:
+                print(f"Error: Failed to write topology file {output_file}: {e}")
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error: Failed to serialize topology: {e}")
+                sys.exit(1)
         
         # =====================================================================
         # ENABLE action
