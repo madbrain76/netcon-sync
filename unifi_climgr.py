@@ -906,138 +906,359 @@ def calculate_ap_mesh_depths(aps: list) -> dict:
     
     return depths
 
-def _capture_mesh_topology(aps: list) -> dict:
+def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
     """
-    Capture the current mesh topology as a dict mapping AP MAC to its uplink AP MAC.
-    Returns dict like: {'ap_mac_1': 'uplink_mac_1', 'ap_mac_2': 'uplink_mac_2', ...}
-    """
-    topology = {}
-    for ap in aps:
-        ap_mac = ap.get('mac')
-        # Get uplink: either uplink_ap_mac or last_uplink.uplink_mac
-        uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
-        # Normalize None to 'wired' for root APs
-        is_wired = ap.get('wired')
-        uplink_type = ap.get('uplink', {}).get('type')
-        is_root = is_wired is True or uplink_type == 'wire'
-        
-        topology[ap_mac] = 'wired' if is_root else (uplink_mac or 'unknown')
-    return topology
-
-def _wait_for_mesh_rebuild(aps_restarted: list, wait_for_mesh_rebuild: bool = False):
-    """
-    Wait for mesh topology to rebuild after AP restarts.
+    Wait for mesh topology to rebuild to match desired state.
     
-    - Fails if no mesh APs (only wired APs)
-    - Records initial topology
-    - Checks every second for up to 30 minutes
-    - Reports topology changes as they occur
-    - Reports status every minute if topology not yet restored
+    Args:
+        desired_topology: Target topology (serialized format from serialize_ap_topology)
+                         List of dicts: [{"mac": "xx:xx:...", "uplink_mac": "yy:yy:..." or None, "name": "AP Name"}, ...]
+        timeout_minutes: Maximum time to wait in minutes (default: 75 minutes)
+    
+    Process:
+    1. Fetch current APs from UniFi and extract their topology
+    2. Verify device list matches (same MACs)
+    3. Display initial diff of desired vs current uplinks with parking status
+    4. Monitor every 5 seconds for topology changes
+    5. Report when APs move to new uplinks with elapsed time and parking status
+    6. End when all APs are correctly parked
+    7. Every minute with no activity, show parking statistics
+    8. Timeout after specified time period
     """
     import time
     
-    if not wait_for_mesh_rebuild:
-        return
-    
-    # Check if we have any mesh APs
-    depths = calculate_ap_mesh_depths(aps_restarted)
-    has_mesh = any(depth >= 1 for depth in depths.values())
-    
-    if not has_mesh:
-        print("ERROR: --wait_for_mesh_rebuild specified but no mesh APs found (only wired APs)")
+    if not desired_topology:
+        print("Error: No desired topology provided")
         sys.exit(1)
     
-    print("\nWaiting for mesh topology to rebuild...")
-    print("Checking every second for up to 30 minutes...\n")
+    # Extract desired MAC set from desired topology
+    desired_macs = {entry['mac'].lower() if entry['mac'] else None for entry in desired_topology}
+    desired_macs.discard(None)
     
-    # Capture initial topology
-    initial_topology = _capture_mesh_topology(aps_restarted)
-    last_topology = initial_topology.copy()
+    # Create lookup dicts for desired topology
+    desired_by_mac = {}
+    desired_names_by_mac = {}
+    for entry in desired_topology:
+        mac = entry.get('mac', '').lower() if entry.get('mac') else None
+        if mac:
+            desired_by_mac[mac] = entry.get('uplink_mac', '').lower() if entry.get('uplink_mac') else None
+            desired_names_by_mac[mac] = entry.get('name', 'Unknown AP')
     
-    max_checks = 1800  # 30 minutes in seconds
-    check_interval = 1  # 1 second
+    print("\nValidating desired topology...")
+    
+    # Do an initial check to validate MAC/name consistency
+    current_devices = unifi_utils.get_devices()
+    current_aps = [d for d in current_devices if d.get("type") == "uap"]
+    current_macs = {ap.get('mac', '').lower() for ap in current_aps if ap.get('mac')}
+    
+    # Check MAC set matches
+    if current_macs != desired_macs:
+        missing_macs = desired_macs - current_macs
+        extra_macs = current_macs - desired_macs
+        
+        if missing_macs or extra_macs:
+            print(f"\n✗ Device list mismatch:")
+            if missing_macs:
+                print(f"  Missing APs in current system: {', '.join(sorted(missing_macs))}")
+            if extra_macs:
+                print(f"  Extra APs in current system: {', '.join(sorted(extra_macs))}")
+            print("\nAborted: Cannot rebuild to desired topology when device set differs.")
+            sys.exit(1)
+    
+    # Build current AP lookup with names
+    current_names_by_mac = {}
+    for ap in current_aps:
+        mac = ap.get('mac', '').lower() if ap.get('mac') else None
+        if mac:
+            current_names_by_mac[mac] = ap.get('name') or ap.get('model', 'Unknown AP')
+    
+    # Validate that names match for all common MACs
+    name_mismatches = []
+    for mac in desired_macs:
+        desired_name = desired_names_by_mac.get(mac, 'Unknown AP')
+        current_name = current_names_by_mac.get(mac, 'Unknown AP')
+        
+        # Normalize names for comparison (case-insensitive comparison)
+        if desired_name.lower() != current_name.lower():
+            name_mismatches.append({
+                'mac': mac,
+                'desired': desired_name,
+                'current': current_name
+            })
+    
+    if name_mismatches:
+        print(f"\n✗ AP name mismatches detected:")
+        for mismatch in name_mismatches:
+            print(f"  {mismatch['mac']}: desired='{mismatch['desired']}' vs current='{mismatch['current']}'")
+        print("\nAborted: AP names in desired topology do not match current system.")
+        print("Please update your topology file to match current AP names.")
+        sys.exit(1)
+    
+    print("✓ Topology validation passed (MACs and names match)")
+    
+    check_interval = 5  # 5 seconds
+    timeout_seconds = timeout_minutes * 60
+    max_checks = timeout_seconds // check_interval
+    last_activity_check = 0
+    start_time = time.time()
+    
+    # Track previous topology for detecting changes
+    last_topology = {}
+    topology_displayed = False
+    topology_changed = False
     
     for check_num in range(1, max_checks + 1):
-        time.sleep(check_interval)
-        
-        # Fetch current device data
+        # Fetch current APs from UniFi
         current_devices = unifi_utils.get_devices()
         current_aps = [d for d in current_devices if d.get("type") == "uap"]
         
-        # Build MAC-indexed lookup for current APs
-        current_aps_by_mac = {ap.get('mac'): ap for ap in current_aps if ap.get('mac')}
+        # Build lookup for current APs
+        current_by_mac = {}
+        current_names_by_mac = {}
+        for ap in current_aps:
+            mac = ap.get('mac', '').lower() if ap.get('mac') else None
+            if mac:
+                current_names_by_mac[mac] = ap.get('name') or ap.get('model', 'Unknown AP')
+                # Determine if wired or mesh
+                is_wired = ap.get('wired') is True or ap.get('uplink', {}).get('type') == 'wire'
+                if is_wired:
+                    current_by_mac[mac] = None
+                else:
+                    uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
+                    if uplink_mac:
+                        uplink_mac = uplink_mac.lower()
+                    current_by_mac[mac] = uplink_mac
         
-        # Capture current topology for just the restarted APs
-        current_topology = {}
-        for ap in aps_restarted:
-            ap_mac = ap.get('mac')
-            current_ap_data = current_aps_by_mac.get(ap_mac, ap)
+        # Display initial diff on first check
+        if not topology_displayed:
+            topology_displayed = True
             
-            uplink_mac = current_ap_data.get('uplink_ap_mac') or current_ap_data.get('last_uplink', {}).get('uplink_mac')
-            is_wired = current_ap_data.get('wired')
-            uplink_type = current_ap_data.get('uplink', {}).get('type')
-            is_root = is_wired is True or uplink_type == 'wire'
+            # Categorize APs into correct and incorrect lists
+            correct_aps = []
+            incorrect_aps = []
             
-            current_topology[ap_mac] = 'wired' if is_root else (uplink_mac or 'unknown')
+            for mac in sorted(desired_by_mac.keys()):
+                ap_name = desired_names_by_mac.get(mac, 'Unknown')
+                desired_uplink = desired_by_mac[mac]
+                current_uplink = current_by_mac.get(mac)
+                ap_state = unifi_utils.get_ap_state(mac)
+                
+                # Format uplink displays with names
+                if desired_uplink is None:
+                    desired_uplink_display = 'WIRED'
+                else:
+                    desired_uplink_name = desired_names_by_mac.get(desired_uplink, 'Unknown')
+                    desired_uplink_display = f'{desired_uplink_name} ({desired_uplink})'
+                
+                if current_uplink is None:
+                    current_uplink_display = 'WIRED'
+                else:
+                    current_uplink_name = current_names_by_mac.get(current_uplink, 'Unknown')
+                    current_uplink_display = f'{current_uplink_name} ({current_uplink})'
+                
+                ap_info = {
+                    'mac': mac,
+                    'name': ap_name,
+                    'current': current_uplink_display,
+                    'desired': desired_uplink_display,
+                    'state': ap_state
+                }
+                
+                # Categorize based on parking status and AP state
+                if desired_uplink == current_uplink and ap_state == "RUNNING":
+                    correct_aps.append(ap_info)
+                else:
+                    incorrect_aps.append(ap_info)
+            
+            # Display correct APs
+            print(f"Initial parking status: {len(correct_aps)} correct, {len(incorrect_aps)} incorrect")
+            
+            if correct_aps:
+                print(f"\n✓ Correctly Parked & Online ({len(correct_aps)}):")
+                for ap in correct_aps:
+                    print(f"  {ap['name']} ({ap['mac']}): {ap['current']} - [{ap['state']}]")
+            
+            if incorrect_aps:
+                print(f"\n✗ Incorrectly Parked or Offline ({len(incorrect_aps)}):")
+                for ap in incorrect_aps:
+                    print(f"  {ap['name']} ({ap['mac']}) [{ap['state']}]")
+                    print(f"    Current: {ap['current']}")
+                    print(f"    Desired: {ap['desired']}")
+            
+            print()
         
-        # Report changes from last check
+        # Detect changes from last topology and count parking status
         changes = {}
-        for ap_mac in current_topology:
-            if current_topology[ap_mac] != last_topology.get(ap_mac):
-                changes[ap_mac] = {
-                    'old': last_topology.get(ap_mac),
-                    'new': current_topology[ap_mac]
+        all_correctly_parked = True
+        correctly_parked_count = 0
+        incorrectly_parked_count = 0
+        running_count = 0
+        not_running_count = 0
+        
+        for mac in current_by_mac:
+            current_uplink = current_by_mac[mac]
+            desired_uplink = desired_by_mac.get(mac)
+            
+            # Check AP state
+            ap_state = unifi_utils.get_ap_state(mac)
+            if ap_state == "RUNNING":
+                running_count += 1
+            else:
+                not_running_count += 1
+                all_correctly_parked = False
+            
+            # Check if correctly parked
+            if current_uplink == desired_uplink and ap_state == "RUNNING":
+                correctly_parked_count += 1
+            else:
+                incorrectly_parked_count += 1
+                all_correctly_parked = False
+            
+            # Check if uplink changed from last check
+            if mac in last_topology and last_topology[mac] != current_uplink:
+                changes[mac] = {
+                    'old': last_topology[mac],
+                    'new': current_uplink
                 }
         
-        # Find AP names for reporting
-        ap_names_by_mac = {ap.get('mac'): (ap.get('name') or ap.get('model', 'Unknown')) for ap in aps_restarted if ap.get('mac')}
-        
-        # Display topology changes whenever they happen
+        # Report uplink changes
         if changes:
-            print(f"\nTopology changes detected at {check_num}s:")
-            for ap_mac, change in changes.items():
-                ap_name = ap_names_by_mac.get(ap_mac, ap_mac)
+            topology_changed = True
+            elapsed = time.time() - start_time
+            print(f"[{elapsed:.0f}s] Uplink changes detected:")
+            for mac, change in changes.items():
+                ap_name = current_names_by_mac.get(mac, 'Unknown')
+                old_uplink = change['old']
+                new_uplink = change['new']
                 
-                # Format old value
-                old_val = change['old']
-                if old_val == 'wired':
-                    old_display = 'wired'
-                elif old_val == 'unknown':
-                    old_display = 'unknown'
+                # Get old uplink name and MAC display
+                if old_uplink is None:
+                    old_uplink_display = 'WIRED'
                 else:
-                    # It's an uplink MAC, find its name
-                    old_uplink_name = ap_names_by_mac.get(old_val, old_val)
-                    old_display = f"{old_uplink_name} ({old_val})"
+                    old_uplink_name = current_names_by_mac.get(old_uplink, 'Unknown')
+                    old_uplink_display = f'{old_uplink_name} ({old_uplink})'
                 
-                # Format new value
-                new_val = change['new']
-                if new_val == 'wired':
-                    new_display = 'wired'
-                elif new_val == 'unknown':
-                    new_display = 'unknown'
+                # Get new uplink name and MAC display
+                if new_uplink is None:
+                    new_uplink_display = 'WIRED'
                 else:
-                    # It's an uplink MAC, find its name
-                    new_uplink_name = ap_names_by_mac.get(new_val, new_val)
-                    new_display = f"{new_uplink_name} ({new_val})"
+                    new_uplink_name = current_names_by_mac.get(new_uplink, 'Unknown')
+                    new_uplink_display = f'{new_uplink_name} ({new_uplink})'
                 
-                print(f"  {ap_name} ({ap_mac}): {old_display} → {new_display}")
+                # Determine parking status after move
+                if new_uplink == desired_by_mac.get(mac):
+                    parking_status = "[CORRECTLY PARKED]"
+                else:
+                    parking_status = "[PARKING VIOLATION]"
+                
+                print(f"  {ap_name} ({mac})")
+                print(f"    From: {old_uplink_display}")
+                print(f"    To:   {new_uplink_display} {parking_status}")
             
-            # Display the current topology tree after changes
-            print("\nCurrent mesh topology:")
-            display_ap_tree(aps_restarted, [])
-        elif check_num % 60 == 0:
-            # Report status every minute if topology not yet restored
-            print(f"Waiting for mesh to rebuild ({check_num}s elapsed)...")
+            last_activity_check = check_num
         
-        # Check if topology has returned to initial state
-        if current_topology == initial_topology:
-            print(f"\n✓ Mesh topology has fully rebuilt (check {check_num}s)!")
+        # Check if all correctly parked
+        if all_correctly_parked:
+            elapsed = time.time() - start_time
+            if topology_changed:
+                print(f"\n✓ Mesh topology fully rebuilt in {elapsed:.0f}s!")
+            else:
+                print(f"\n✓ All APs already correctly parked (topology unchanged)")
+            print(f"  All {correctly_parked_count} APs correctly parked and in RUNNING state")
             return
         
-        last_topology = current_topology.copy()
+        # Report statistics every minute with no activity
+        checks_since_activity = check_num - last_activity_check
+        if checks_since_activity > 0 and checks_since_activity % 12 == 0:  # Every 60 seconds (12 * 5s)
+            elapsed = time.time() - start_time
+            print(f"[{elapsed:.0f}s] Status: {correctly_parked_count} correct, {incorrectly_parked_count} incorrect | {running_count} running, {not_running_count} not running")
+        
+        # Update last topology
+        last_topology = current_by_mac.copy()
+        
+        # Sleep before next check (not before first check)
+        time.sleep(check_interval)
     
-    print(f"\n⚠ Timeout: Mesh topology did not fully rebuild after {max_checks}s (30 minutes)")
-    print("Final topology differs from initial state. Some mesh APs may still be reconnecting.")
+    # Timeout - build final report
+    elapsed = time.time() - start_time
+    timeout_minutes_display = timeout_minutes
+    
+    # Recalculate current state for final report
+    current_devices = unifi_utils.get_devices()
+    current_aps = [d for d in current_devices if d.get("type") == "uap"]
+    
+    current_names_by_mac = {}
+    current_by_mac = {}
+    for ap in current_aps:
+        mac = ap.get('mac', '').lower() if ap.get('mac') else None
+        if mac:
+            current_names_by_mac[mac] = ap.get('name') or ap.get('model', 'Unknown AP')
+            is_wired = ap.get('wired') is True or ap.get('uplink', {}).get('type') == 'wire'
+            if is_wired:
+                current_by_mac[mac] = None
+            else:
+                uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
+                if uplink_mac:
+                    uplink_mac = uplink_mac.lower()
+                current_by_mac[mac] = uplink_mac
+    
+    # Categorize APs for final report
+    correct_aps = []
+    incorrect_aps = []
+    
+    for mac in sorted(desired_by_mac.keys()):
+        ap_name = desired_names_by_mac.get(mac, 'Unknown')
+        desired_uplink = desired_by_mac[mac]
+        current_uplink = current_by_mac.get(mac)
+        ap_state = unifi_utils.get_ap_state(mac)
+        
+        # Format uplink displays with names
+        if current_uplink is None:
+            current_uplink_display = 'WIRED'
+        else:
+            current_uplink_name = current_names_by_mac.get(current_uplink, 'Unknown')
+            current_uplink_display = f'{current_uplink_name} ({current_uplink})'
+        
+        if desired_uplink is None:
+            desired_uplink_display = 'WIRED'
+        else:
+            desired_uplink_name = desired_names_by_mac.get(desired_uplink, 'Unknown')
+            desired_uplink_display = f'{desired_uplink_name} ({desired_uplink})'
+        
+        ap_info = {
+            'mac': mac,
+            'name': ap_name,
+            'current': current_uplink_display,
+            'desired': desired_uplink_display,
+            'state': ap_state
+        }
+        
+        # Categorize
+        if desired_uplink == current_uplink and ap_state == "RUNNING":
+            correct_aps.append(ap_info)
+        else:
+            incorrect_aps.append(ap_info)
+    
+    print(f"\n⚠ Timeout after {elapsed:.0f}s ({timeout_minutes_display} minutes)")
+    print(f"Final status: {len(correct_aps)} correctly parked, {len(incorrect_aps)} parking violations")
+    print(f"AP states: {running_count} running, {not_running_count} not running")
+    
+    # Display correctly parked APs
+    if correct_aps:
+        print(f"\n✓ Correctly Parked & Online ({len(correct_aps)}):")
+        for ap in correct_aps:
+            print(f"  {ap['name']} ({ap['mac']}): {ap['current']} - [{ap['state']}]")
+    
+    # Display incorrectly parked or offline APs
+    if incorrect_aps:
+        print(f"\n✗ Incorrectly Parked or Offline ({len(incorrect_aps)}):")
+        for ap in incorrect_aps:
+            print(f"  {ap['name']} ({ap['mac']}) [{ap['state']}]")
+            print(f"    Current: {ap['current']}")
+            print(f"    Desired: {ap['desired']}")
+    
+    print("\nAborting: Some APs still have parking violations or are not in running state.")
+    sys.exit(1)
 
 def handle_forget_action_batch(clients: list):
     """Forgets a batch of clients in a single, efficient API call."""
@@ -2238,7 +2459,6 @@ EXAMPLES:
     restart_ap_target = restart_ap_parser.add_mutually_exclusive_group(required=False)
     restart_ap_target.add_argument('--ap_mac', type=str, help='Restart AP by MAC address')
     restart_ap_target.add_argument('--ap_name', type=str, help='Restart AP by name')
-    restart_ap_parser.add_argument('--wait_for_mesh_rebuild', action='store_true', help='Wait for mesh topology to rebuild (30-minute timeout, checks every second, status every minute)')
 
     # ============================================================================
     # UPGRADE_AP action
@@ -2269,18 +2489,39 @@ EXAMPLES:
     check_ap_target.add_argument('--ap_name', type=str, help='Check AP by name')
 
     # ============================================================================
-    # SAVE_TOPOLOGY action (export current mesh topology)
+    # SAVE_MESH_TOPOLOGY action (export current mesh topology)
     # ============================================================================
-    save_topology_parser = subparsers.add_parser(
-        'save_topology',
+    save_mesh_topology_parser = subparsers.add_parser(
+        'save_mesh_topology',
         help='Export current AP mesh topology to JSON file',
         allow_abbrev=False
     )
-    save_topology_parser.add_argument(
+    save_mesh_topology_parser.add_argument(
         'filename',
         nargs='?',
         default=None,
         help='JSON file to save topology to (default: ~/.netcon-sync/topology.json)'
+    )
+
+    # ============================================================================
+    # WAIT_FOR_MESH_TOPOLOGY action
+    # ============================================================================
+    wait_for_mesh_topology_parser = subparsers.add_parser(
+        'wait_for_mesh_topology',
+        help='Wait for mesh network topology to rebuild to match desired state',
+        allow_abbrev=False
+    )
+    wait_for_mesh_topology_parser.add_argument(
+        'filename',
+        nargs='?',
+        default=None,
+        help='JSON file with desired topology (default: ~/.netcon-sync/topology.json)'
+    )
+    wait_for_mesh_topology_parser.add_argument(
+        '--timeout',
+        type=int,
+        default=75,
+        help='Maximum time to wait for topology to rebuild, in minutes (default: 75)'
     )
 
     # ============================================================================
@@ -2586,6 +2827,11 @@ EXAMPLES:
                 # Restart all APs
                 aps_to_restart = aps
             
+            # Display the mesh topology before restarting (only if more than one AP)
+            if len(aps_to_restart) > 1:
+                print()
+                display_ap_tree(aps_to_restart, all_devices)
+            
             # Check if there are any mesh APs (depth >= 1)
             depths = calculate_ap_mesh_depths(aps_to_restart)
             has_mesh_aps = any(depth >= 1 for depth in depths.values())
@@ -2648,10 +2894,6 @@ EXAMPLES:
                             print("[OK]")
                         else:
                             print("[FAIL]")
-            
-            # Wait for mesh rebuild if requested
-            if args.wait_for_mesh_rebuild:
-                _wait_for_mesh_rebuild(aps_to_restart, wait_for_mesh_rebuild=True)
             
             sys.exit(0)
         
@@ -2755,20 +2997,32 @@ EXAMPLES:
                                     if dry_run:
                                         print(f"[UPGRADABLE] {current} → {new}")
                                     else:
+                                        # Get initial state before the upgrade was initiated
+                                        initial_state = unifi_utils.get_ap_state(ap_mac)
+                                        
                                         initiation_time = time.time()
                                         initiation_time_str = datetime.now().strftime("%H:%M:%S")
                                         print(f"[INITIATING] {current} → {new} at {initiation_time_str}")
-                                        # Track this AP for monitoring
-                                        aps_upgrading[ap_mac] = {
-                                            "name": ap_name,
-                                            "target_version": new,
-                                            "current_version": current
-                                        }
-                                        ap_initiation_times[ap_mac] = initiation_time
-                                        layer_has_upgrade = True
-                                        # Add configurable delay after each upgrade initiation in actual mode
-                                        print(f"  Waiting {args.ap_upgrade_delay} seconds before next AP...\n")
-                                        time.sleep(args.ap_upgrade_delay)
+                                        
+                                        # Verify upgrade state change
+                                        verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
+                                        if verify_result['success']:
+                                            print(f"  ✓ State change confirmed: {initial_state} → {verify_result['final_state']}\n")
+                                            # Track this AP for monitoring
+                                            aps_upgrading[ap_mac] = {
+                                                "name": ap_name,
+                                                "target_version": new,
+                                                "current_version": current
+                                            }
+                                            ap_initiation_times[ap_mac] = initiation_time
+                                            layer_has_upgrade = True
+                                        else:
+                                            print(f"  ✗ {verify_result['message']}\n")
+                                        
+                                        # Add configurable delay after each upgrade initiation attempt (only if successful)
+                                        if verify_result['success']:
+                                            print(f"  Waiting {args.ap_upgrade_delay} seconds before next AP...\n")
+                                            time.sleep(args.ap_upgrade_delay)
                                 else:
                                     print(f"(already latest)")
                             else:
@@ -2891,16 +3145,26 @@ EXAMPLES:
                                 if dry_run:
                                     print(f"[UPGRADABLE] {current} → {new}")
                                 else:
+                                    # Get initial state before the upgrade was initiated
+                                    initial_state = unifi_utils.get_ap_state(ap_mac)
+                                    
                                     initiation_time = time.time()
                                     initiation_time_str = datetime.now().strftime("%H:%M:%S")
                                     print(f"[INITIATING] {current} → {new} at {initiation_time_str}")
-                                    # Track this AP for monitoring
-                                    aps_upgrading[ap_mac] = {
-                                        "name": ap_name,
-                                        "target_version": new,
-                                        "current_version": current
-                                    }
-                                    ap_initiation_times[ap_mac] = initiation_time
+                                    
+                                    # Verify upgrade state change
+                                    verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
+                                    if verify_result['success']:
+                                        print(f"  ✓ State change confirmed: {initial_state} → {verify_result['final_state']}\n")
+                                        # Track this AP for monitoring
+                                        aps_upgrading[ap_mac] = {
+                                            "name": ap_name,
+                                            "target_version": new,
+                                            "current_version": current
+                                        }
+                                        ap_initiation_times[ap_mac] = initiation_time
+                                    else:
+                                        print(f"  ✗ {verify_result['message']}\n")
                             else:
                                 print(f"(already latest)")
                         else:
@@ -3076,9 +3340,9 @@ EXAMPLES:
             sys.exit(0)
         
         # =====================================================================
-        # SAVE_TOPOLOGY action (export current mesh topology to JSON)
+        # SAVE_MESH_TOPOLOGY action (export current mesh topology to JSON)
         # =====================================================================
-        if args.action == 'save_topology':
+        if args.action == 'save_mesh_topology':
             # Determine output filename
             if args.filename:
                 output_file = os.path.expanduser(args.filename)
@@ -3113,13 +3377,10 @@ EXAMPLES:
                     f.write(json_str)
                 
                 print(f"✓ Topology saved to: {output_file}")
-                print(f"  APs: {len(aps)}")
+                print(f"  APs: {len(aps)}\n")
                 
-                # Show preview
-                topology = serialize_ap_topology(aps)
-                for entry in topology:
-                    uplink = entry['uplink_mac'] or 'WIRED'
-                    print(f"  - {entry['name']} ({entry['mac']}) → {uplink}")
+                # Display tree view
+                display_ap_tree(aps, show_macs=True)
                 
                 sys.exit(0)
             except (IOError, OSError, PermissionError) as e:
@@ -3128,6 +3389,55 @@ EXAMPLES:
             except Exception as e:
                 print(f"Error: Failed to serialize topology: {e}")
                 sys.exit(1)
+        
+        # =====================================================================
+        # WAIT_FOR_MESH_TOPOLOGY action
+        # =====================================================================
+        if args.action == 'wait_for_mesh_topology':
+            # Determine input filename
+            if args.filename:
+                topology_file = os.path.expanduser(args.filename)
+            else:
+                # Default: ~/.netcon-sync/topology.json
+                topology_file = os.path.expanduser("~/.netcon-sync/topology.json")
+            
+            # Load desired topology from JSON file
+            if not os.path.exists(topology_file):
+                print(f"Error: Topology file not found: {topology_file}")
+                print("\nFirst, save a topology using: ./unifi_climgr.py save_mesh_topology")
+                sys.exit(1)
+            
+            try:
+                with open(topology_file, 'r') as f:
+                    json_content = f.read()
+                
+                # Parse JSON into serialized format (list of dicts)
+                topology_list = json.loads(json_content)
+                
+                if not topology_list:
+                    print(f"Error: Empty topology in {topology_file}")
+                    sys.exit(1)
+                
+                # Deserialize into AP objects for tree display
+                desired_aps = deserialize_ap_topology(topology_list)
+                
+                print(f"Loaded desired topology from: {topology_file}")
+                print(f"Desired APs: {len(topology_list)}\n")
+                
+                # Display as tree
+                display_ap_tree(desired_aps, show_macs=True)
+                
+                # Wait for mesh topology to rebuild
+                _wait_for_mesh_topology(topology_list, timeout_minutes=args.timeout)
+                
+            except (IOError, OSError, PermissionError) as e:
+                print(f"Error: Failed to read topology file {topology_file}: {e}")
+                sys.exit(1)
+            except (json.JSONDecodeError, ValueError) as e:
+                print(f"Error: Failed to parse topology file as JSON {topology_file}: {e}")
+                sys.exit(1)
+            
+            sys.exit(0)
         
         # =====================================================================
         # ENABLE action

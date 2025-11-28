@@ -1446,6 +1446,56 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
         }
 
 
+def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
+    """
+    Verifies that a firmware upgrade has been successfully initiated on an AP.
+    Checks that the AP's state changes from its initial state.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP
+        initial_state (str): The AP state before the upgrade was initiated
+        
+    Returns:
+        dict: {
+            "success": bool - Whether state change was detected,
+            "message": str - Status message,
+            "final_state": str - AP state after state change confirmed (if success)
+        }
+    """
+    import time
+    
+    # Retry loop: check up to 6 times over 1 minute (with 10-second checks)
+    max_retries = 6
+    check_interval = 10  # seconds
+    state_changed = False
+    final_state = initial_state
+    
+    for retry_num in range(max_retries):
+        # Wait a bit for state to change
+        time.sleep(check_interval)
+        
+        # Check if state changed
+        current_state = get_ap_state(ap_mac)
+        
+        if current_state != initial_state:
+            state_changed = True
+            final_state = current_state
+            break
+    
+    if state_changed:
+        return {
+            "success": True,
+            "message": f"State changed from {initial_state} to {final_state}",
+            "final_state": final_state
+        }
+    else:
+        return {
+            "success": False,
+            "message": f"AP state did not change after {max_retries * check_interval} seconds (remained {initial_state})",
+            "final_state": current_state
+        }
+
+
 def get_ap_current_version(ap_mac: str) -> str:
     """
     Get the current firmware version of an AP.
