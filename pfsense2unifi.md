@@ -38,6 +38,22 @@ This tool automates the export of client lists from pfSense to UniFi. It reads D
 
 Please see the READMe.md Configuration section .
 
+## Flags & Options
+
+### Sync Command Flags
+
+#### `--suffix SUFFIX`
+- **Default:** `" - Wifi"`
+- **Description:** Filter clients by description suffix. Only pfSense clients whose description ends with this suffix will be synced to UniFi.
+- **Special Value:** Use `--suffix NONE` to sync all clients without filtering by suffix.
+- **Example:** `--suffix "@unifi"` syncs only clients ending in "@unifi"
+- **Example:** `--suffix NONE` syncs all DHCP clients
+
+#### `--delete-orphans`
+- **Default:** Not set (merge mode)
+- **Description:** Delete UniFi clients not found in pfSense. Without this flag, the sync performs a merge: adds new clients, updates existing ones, leaves others alone. With this flag, also removes clients from UniFi that don't exist in pfSense.
+- **Example:** `--delete-orphans`
+
 ## Usage
 
 ### Basic Sync (Merge Mode)
@@ -58,19 +74,37 @@ By default, only clients with pfSense descriptions ending in ` - Wifi` are synce
 ./pfsense2unifi.py sync --suffix " - Home"
 ```
 
+### Sync All Clients (No Filtering)
+
+To migrate every DHCP client without filtering by suffix:
+
+```bash
+./pfsense2unifi.py sync --suffix NONE
+```
+
+This is useful when migrating all clients from pfSense to UniFi, regardless of their description.
+
 ### Delete Orphaned Clients
 
-Remove clients from UniFi that weren't present in the pfSense DHCP table:
+**Flag:** `--delete-orphans`
+
+Remove clients from UniFi that weren't present in the pfSense DHCP table. By default, the sync performs a merge operation (adds new clients, updates existing ones, leaves others alone). Use this flag to also delete orphaned clients:
 
 ```bash
 ./pfsense2unifi.py sync --delete-orphans
 ```
 
+Combined with custom filtering:
+
+```bash
+./pfsense2unifi.py sync --suffix "@unifi" --delete-orphans
+```
+
 ### Help & Options
 
 ```bash
-./pfsense2unifi.py --help          # Main help
-./pfsense2unifi.py sync --help     # Sync options
+./pfsense2unifi.py --help          # Main help (lists subcommands)
+./pfsense2unifi.py sync --help     # Sync subcommand options (includes --delete-orphans)
 ./pfsense2unifi.py trust --help    # Certificate options
 ```
 

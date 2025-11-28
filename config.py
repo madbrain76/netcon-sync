@@ -25,6 +25,71 @@ Example (pfSense2UniFi sync scripts):
 
 import os
 import sys
+import subprocess
+
+
+def _detect_local_domain() -> str:
+    """
+    Auto-detect the local domain from OS configuration.
+    Tries multiple methods in order:
+    1. /etc/resolv.conf search domains
+    2. dnsdomainname command
+    3. hostname -d command
+    4. Falls back to empty string
+    
+    Returns:
+        str: Local domain (e.g., "example.com") or empty string if not found
+    """
+    # Method 1: Try /etc/resolv.conf for search domains
+    try:
+        with open('/etc/resolv.conf', 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('search '):
+                    # "search example.com local" -> return first domain
+                    domains = line[7:].split()
+                    if domains:
+                        return domains[0]
+                elif line.startswith('domain '):
+                    # "domain example.com" -> return it
+                    domain = line[7:].strip()
+                    if domain:
+                        return domain
+    except (FileNotFoundError, PermissionError, IOError):
+        pass
+    
+    # Method 2: Try dnsdomainname command
+    try:
+        result = subprocess.run(['dnsdomainname'], capture_output=True, text=True, timeout=1)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+    
+    # Method 3: Try hostname -d command
+    try:
+        result = subprocess.run(['hostname', '-d'], capture_output=True, text=True, timeout=1)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+    
+    # Method 4: Try systemd-resolved (if available)
+    try:
+        result = subprocess.run(['resolvectl', 'query', '--legend=no', 'localhost'], 
+                              capture_output=True, text=True, timeout=1)
+        if result.returncode == 0:
+            # Parse output to find domain
+            for line in result.stdout.split('\n'):
+                if 'Search domains:' in line:
+                    domains = line.split('Search domains:')[1].strip().split()
+                    if domains:
+                        return domains[0]
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+    
+    # No domain found
+    return ""
 
 
 def _validate_unifi_config() -> dict:
@@ -32,17 +97,23 @@ def _validate_unifi_config() -> dict:
     Load and validate UniFi-specific environment variables.
     Required for all scripts.
     
+    DEFAULT_DOMAIN is auto-detected from OS configuration.
+    
     Returns:
         dict: Configuration dictionary with UniFi values
     
     Raises:
         ValueError: If required UniFi variables are missing
     """
+    # Auto-detect from OS configuration
+    default_domain = _detect_local_domain()
+    
     config = {
         "UNIFI_NETWORK_URL": os.getenv("UNIFI_NETWORK_URL"),
         "UNIFI_USERNAME": os.getenv("UNIFI_USERNAME"),
         "UNIFI_PASSWORD": os.getenv("UNIFI_PASSWORD"),
         "UNIFI_SITE_ID": os.getenv("UNIFI_SITE_ID", "default"),
+        "DEFAULT_DOMAIN": default_domain,
     }
     
     missing_vars = [var for var in ["UNIFI_NETWORK_URL", "UNIFI_USERNAME", "UNIFI_PASSWORD"] 
@@ -86,6 +157,7 @@ try:
     UNIFI_USERNAME = _unifi_config["UNIFI_USERNAME"]
     UNIFI_PASSWORD = _unifi_config["UNIFI_PASSWORD"]
     UNIFI_SITE_ID = _unifi_config["UNIFI_SITE_ID"]
+    DEFAULT_DOMAIN = _unifi_config["DEFAULT_DOMAIN"]
 except ValueError as e:
     # Re-raise to let the importing script handle it with proper error display
     raise

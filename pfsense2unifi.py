@@ -75,7 +75,7 @@ PFSENSE_DHCP_INTERFACE = None
 # Import functions from the provided utility files
 try:
     from pfsense_utils import get_pfsense_dhcp_static_mappings, validate_mac_address
-    from unifi_utils import login, add_client, get_all_unifi_clients, forget_client
+    from unifi_utils import login, add_client, get_all_unifi_clients, forget_client, forget_clients_batch
     from trust import handle_trust_ca_cert, handle_trust_server_url, format_nss_error
     from urllib.parse import urlparse
 except ModuleNotFoundError as e:
@@ -133,14 +133,18 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
         print(f"  - {client['mac']}: {client['name']}")
     
     if delete_orphans:
-        print("\nDeleting orphaned clients...")
-        for client in orphan_results["found"]:
-            if forget_client(client["mac"]):
-                orphan_results["deleted"].append(client)
-                print(f"  [OK] Deleted: {client['mac']} ({client['name']})")
-            else:
-                orphan_results["failed_to_delete"].append(client)
-                print(f"  [FAIL] Failed to delete: {client['mac']} ({client['name']})")
+        print("\nDeleting orphaned clients (batch operation)...")
+        orphan_macs = [client["mac"] for client in orphan_results["found"]]
+        
+        # Use batch forget for efficiency (single API call instead of one per client)
+        batch_result = forget_clients_batch(orphan_macs)
+        
+        if batch_result["success"]:
+            orphan_results["deleted"] = orphan_results["found"]
+            print(f"  [OK] Deleted {batch_result['sent']} orphaned clients in single API call")
+        else:
+            orphan_results["failed_to_delete"] = orphan_results["found"]
+            print(f"  [FAIL] Failed to delete orphaned clients")
         
         print(f"\nDeleted {len(orphan_results['deleted'])}/{len(orphan_results['found'])} orphaned clients")
         if orphan_results["failed_to_delete"]:
@@ -173,7 +177,9 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
     import time
     
     # Use provided suffix or default to " - Wifi"
+    # Special case: "NONE" means no filtering (sync all clients)
     client_suffix = suffix if suffix else " - Wifi"
+    no_suffix_filter = (client_suffix == "NONE")
     
     # Track results
     results = {
@@ -233,20 +239,27 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                 })
                 continue
 
-            # Apply filtering
-            if not descr or not descr.endswith(client_suffix):
-                results["filtered_out"].append({
-                    "mac": mac,
-                    "description": descr or "(no description)",
-                    "hostname": hostname or "(no hostname)"
-                })
-                continue
+            # Apply filtering (skip if no_suffix_filter is True)
+            if not no_suffix_filter:
+                if not descr or not descr.endswith(client_suffix):
+                    results["filtered_out"].append({
+                        "mac": mac,
+                        "description": descr or "(no description)",
+                        "hostname": hostname or "(no hostname)"
+                    })
+                    continue
 
             # Build client name and note
-            unifi_client_name = descr[:-len(client_suffix)].strip()
-            if not unifi_client_name:
-                unifi_client_name = hostname if hostname else f"AP (MAC: {mac})"
-            unifi_note = hostname if hostname else ""
+            if no_suffix_filter:
+                # No suffix filtering: use description as-is, or hostname if no description
+                unifi_client_name = descr if descr else (hostname if hostname else f"AP (MAC: {mac})")
+                unifi_note = hostname if hostname else ""
+            else:
+                # With suffix filtering: strip the suffix from description
+                unifi_client_name = descr[:-len(client_suffix)].strip()
+                if not unifi_client_name:
+                    unifi_client_name = hostname if hostname else f"AP (MAC: {mac})"
+                unifi_note = hostname if hostname else ""
 
             normalized_mac = mac.lower()
             existing_client = unifi_clients_by_mac.get(normalized_mac)
@@ -371,7 +384,10 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         print("="*70)
         print(f"Total pfSense clients retrieved: {len(pfsense_mappings)}")
         print(f"  - Clients with invalid MAC format: {len(results['invalid_mac'])}")
-        print(f"  - Clients filtered out (not ending in '{client_suffix}'): {len(results['filtered_out'])}")
+        if no_suffix_filter:
+            print(f"  - Suffix filtering: NONE (syncing all clients)")
+        else:
+            print(f"  - Clients filtered out (not ending in '{client_suffix}'): {len(results['filtered_out'])}")
         print(f"  - Clients successfully created in UniFi: {len(results['created'])}")
         print(f"  - Clients successfully updated in UniFi (fields changed): {len(results['updated'])}")
         print(f"  - Clients failed to add/update: {len(results['failed'])}")
@@ -430,6 +446,13 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         pass
 
 
+class CustomFormatter(argparse.RawDescriptionHelpFormatter):
+    """Custom formatter that renames 'positional arguments' to 'commands'."""
+    def start_section(self, heading):
+        if heading == "positional arguments":
+            heading = "commands"
+        super().start_section(heading)
+
 class HelpArgumentParser(argparse.ArgumentParser):
     """Custom ArgumentParser that shows full help page on invalid arguments."""
     def error(self, message):
@@ -441,7 +464,7 @@ class HelpArgumentParser(argparse.ArgumentParser):
 if __name__ == "__main__":
     parser = HelpArgumentParser(
         description="Sync DHCP reservations from pfSense to UniFi controller",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=CustomFormatter,
         epilog=f"""ENVIRONMENT VARIABLES (REQUIRED):
   UNIFI_NETWORK_URL         UniFi controller URL (e.g., https://192.168.1.100:8443)
   UNIFI_USERNAME            UniFi admin username
@@ -460,6 +483,9 @@ EXAMPLES:
   # Sync only clients ending in " - Wired"
   %(prog)s sync --suffix " - Wired"
 
+  # Sync all clients without filtering
+  %(prog)s sync --suffix NONE
+
   # Sync with custom suffix and delete orphans
   %(prog)s sync --suffix "@unifi" --delete-orphans
 
@@ -468,40 +494,66 @@ EXAMPLES:
   %(prog)s trust --server https://pfsense.example.com"""
     )
     
+    # Global options (appear in main help)
+    parser.add_argument(
+        "--delete-orphans",
+        action="store_true",
+        help="Delete UniFi clients not found in pfSense (for sync command only)"
+    )
+    parser.add_argument(
+        "--suffix",
+        metavar="SUFFIX",
+        default=None,
+        help="Client description suffix to filter by (for sync command only, default: ' - Wifi'). Use --suffix NONE to sync all clients without filtering"
+    )
+    
+    # Trust certificate options (appear in main help)
+    trust_options_group = parser.add_mutually_exclusive_group()
+    trust_options_group.add_argument(
+        "--ca",
+        metavar="PATH",
+        help="Import and trust a CA certificate from file (for trust command only, PEM or DER format)"
+    )
+    trust_options_group.add_argument(
+        "--server",
+        metavar="URL",
+        help="Connect to a server URL and trust its certificate (for trust command only, e.g., https://example.com:8443)"
+    )
+    
     subparsers = parser.add_subparsers(dest="action", help="")
     
     # Sync subcommand
     sync_parser = subparsers.add_parser(
         "sync",
-        help="Sync DHCP reservations from pfSense to UniFi (use --delete-orphans to remove clients not in pfSense)"
+        help="Sync DHCP reservations from pfSense to UniFi"
+    )
+    sync_parser.add_argument(
+        "--delete-orphans",
+        action="store_true",
+        help="Delete UniFi clients not found in pfSense. By default, performs merge: adds new clients, updates existing ones, leaves others alone. Use this flag to remove clients from UniFi that don't exist in pfSense."
     )
     sync_parser.add_argument(
         "--suffix",
         metavar="SUFFIX",
         default=None,
-        help="Client description suffix to filter by (default: ' - Wifi')"
-    )
-    sync_parser.add_argument(
-        "--delete-orphans",
-        action="store_true",
-        help="Delete UniFi clients that were not updated by this sync (clients that existed but weren't in pfSense). By default, performs a merge (adds/updates existing, leaves others alone)."
+        help="Client description suffix to filter by (default: ' - Wifi'). Use --suffix NONE to sync all clients"
     )
     
     # Trust subcommand
     trust_parser = subparsers.add_parser(
         "trust",
-        help="Trust a certificate for HTTPS connections"
+        help="Trust a certificate for HTTPS connections (requires --ca or --server)"
     )
-    trust_group = trust_parser.add_mutually_exclusive_group(required=True)
-    trust_group.add_argument(
+    trust_subgroup = trust_parser.add_mutually_exclusive_group(required=True)
+    trust_subgroup.add_argument(
         "--ca",
         metavar="PATH",
-        help="Import a CA certificate from file (DER or PEM format)"
+        help="Import and trust a CA certificate from file (PEM or DER format)"
     )
-    trust_group.add_argument(
+    trust_subgroup.add_argument(
         "--server",
         metavar="URL",
-        help="Trust a server certificate from URL (e.g., https://example.com:8443)"
+        help="Connect to a server URL and trust its certificate (e.g., https://example.com:8443)"
     )
     
     args = parser.parse_args()
@@ -543,8 +595,12 @@ EXAMPLES:
     
     # Show help if no action specified
     if not args.action:
-        parser.print_help()
-        sys.exit(0)
+        # If --ca or --server provided without command, auto-run trust
+        if args.ca or args.server:
+            args.action = "trust"
+        else:
+            parser.print_help()
+            sys.exit(0)
     
     # Load pfSense config when needed
     if args.action == "sync":

@@ -172,6 +172,94 @@ def get_devices() -> list:
         return []
 
 
+def _derive_band_from_channel(channel) -> str:
+    """
+    Derive WiFi band (2.4, 5, 6) from channel number.
+    """
+    if channel == "N/A" or channel == "":
+        return "N/A"
+    try:
+        ch = int(channel)
+        if 1 <= ch <= 14:
+            return "2.4"
+        elif 36 <= ch <= 165:
+            return "5"
+        elif 1 <= ch <= 233:  # 6 GHz band
+            return "6"
+    except (ValueError, TypeError):
+        pass
+    return "N/A"
+
+
+def _derive_wifi_generation_from_proto(proto) -> str:
+    """
+    Derive WiFi generation (1-7) from protocol string.
+    Proto values from UniFi: 'a', 'b', 'g', 'n', 'ac', 'ax', 'be', 'ng', 'na', etc.
+    
+    The proto value reflects what the CLIENT is actually using, not AP capabilities.
+    The actual band (2.4/5/6 GHz) is determined by the channel, not the proto.
+    
+    Proto mappings:
+    'a'  = 802.11a (WiFi 2, 5 GHz only)
+    'b'  = 802.11b (WiFi 1, 2.4 GHz only)
+    'g'  = 802.11g (WiFi 3, 2.4 GHz only)
+    'n'  = 802.11n (WiFi 4, can operate on 2.4 or 5 GHz)
+    'ng' = 802.11n (WiFi 4, explicitly 2.4 GHz)
+    'na' = 802.11n (WiFi 4, explicitly 5 GHz)
+    'ac' = 802.11ac (WiFi 5, 5 GHz only)
+    'ax' = 802.11ax (WiFi 6, can operate on 2.4, 5, or 6 GHz)
+    'be' = 802.11be (WiFi 7, can operate on 2.4, 5, or 6 GHz)
+    """
+    if not proto or proto == "N/A":
+        return "N/A"
+    
+    proto_lower = str(proto).lower()
+    
+    # Map protocol to WiFi generation (numerical only)
+    proto_map = {
+        "a": "2",
+        "b": "1",
+        "g": "3",
+        "n": "4",
+        "ng": "4",      # 802.11n on 2.4GHz
+        "na": "4",      # 802.11n on 5GHz
+        "ac": "5",
+        "ax": "6",
+        "be": "7",
+    }
+    
+    return proto_map.get(proto_lower, "N/A")
+
+
+def _derive_ieee_version_from_proto(proto) -> str:
+    """
+    Derive IEEE 802.11 version from protocol string.
+    Proto values from UniFi: 'a', 'b', 'g', 'n', 'ac', 'ax', 'be', 'ng', 'na', etc.
+    
+    The actual band (2.4/5/6 GHz) is determined by the channel, not the proto.
+    802.11n, 802.11ax, and 802.11be can operate on multiple bands.
+    """
+    if not proto or proto == "N/A":
+        return "N/A"
+    
+    proto_lower = str(proto).lower()
+    
+    # Map protocol to IEEE version
+    ieee_map = {
+        "a": "802.11a",
+        "b": "802.11b",
+        "g": "802.11g",
+        "n": "802.11n",
+        "ng": "802.11n",     # 802.11n on 2.4GHz
+        "na": "802.11n",     # 802.11n on 5GHz
+        "ac": "802.11ac",
+        "ax": "802.11ax",
+        "be": "802.11be",
+    }
+    
+    return ieee_map.get(proto_lower, "N/A")
+
+
 def _get_unifi_clients_fast() -> dict:
     """
     Fast lightweight fetch of UniFi clients WITHOUT DNS lookups.
@@ -230,6 +318,11 @@ def get_all_unifi_clients() -> list:
         merged_client["connected_ap_name"] = "N/A"
         merged_client["live_signal"] = "N/A"
         merged_client["live_uptime"] = "N/A"
+        merged_client["live_channel"] = "N/A"
+        merged_client["live_band"] = "N/A"
+        merged_client["live_wifi_generation"] = "N/A"
+        merged_client["live_ieee_version"] = "N/A"
+        merged_client["live_ssid"] = "N/A"
         merged_client["is_ap_locked"] = False
         merged_client["locked_ap_name"] = "N/A"
         merged_client["locked_ap_mac"] = "N/A"
@@ -245,6 +338,16 @@ def get_all_unifi_clients() -> list:
             merged_client["live_uptime"] = live_data.get("uptime")
             merged_client["tx_retries"] = live_data.get("tx_retries", "N/A")
             merged_client["tx_retries_display"] = str(live_data.get("tx_retries")) if live_data.get("tx_retries") is not None else "N/A"
+            merged_client["live_channel"] = live_data.get("channel", "N/A")
+            merged_client["live_ssid"] = live_data.get("essid", live_data.get("ssid", "N/A"))
+            
+            # Derive band, WiFi generation, and IEEE version from channel and proto
+            channel = live_data.get("channel", "N/A")
+            proto = live_data.get("radio_proto", "N/A")  # e.g., "a", "b", "g", "n", "ac", "ax", "be", "ng", "na"
+            
+            merged_client["live_band"] = _derive_band_from_channel(channel)
+            merged_client["live_wifi_generation"] = _derive_wifi_generation_from_proto(proto)
+            merged_client["live_ieee_version"] = _derive_ieee_version_from_proto(proto)
             
             live_ap_mac = live_data.get("ap_mac")
             if live_ap_mac:
@@ -518,6 +621,93 @@ def forget_client(mac: str) -> bool:
         return True
     except (Exception, json.JSONDecodeError):
         return False
+
+def forget_clients_batch(macs: list) -> dict:
+    """
+    Instructs the UniFi controller to "forget" multiple clients in a single API call.
+    This is much faster than calling forget_client() repeatedly.
+    
+    UniFi's forget-sta command sometimes silently fails for certain client types or states,
+    especially those without descriptions. If batch delete fails or devices still exist,
+    falls back to individual forget calls.
+    
+    Args:
+        macs (list): List of MAC addresses to forget (e.g., ["11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"]).
+    
+    Returns:
+        dict: Results with keys:
+            - "total": Total MAC addresses provided
+            - "sent": Number of MACs sent to the controller
+            - "success": True if all clients were successfully forgotten
+    """
+    results = {"total": len(macs), "sent": 0, "success": False}
+    
+    if not macs:
+        return results
+    
+    # Filter out empty strings and convert to lowercase
+    mac_list = [mac.lower() for mac in macs if mac]
+    results["sent"] = len(mac_list)
+    
+    if not mac_list:
+        return results
+    
+    endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/stamgr"
+    payload = {"cmd": "forget-sta", "macs": mac_list}
+    
+    try:
+        # Try batch forget first (faster)
+        _make_unifi_api_call("POST", endpoint, json=payload)
+        
+        # Verify that the clients were actually forgotten
+        # Some UniFi versions silently fail for certain device types
+        remaining_clients = _get_unifi_clients_fast()
+        remaining_macs = {mac.lower() for mac in remaining_clients.keys()}
+        
+        still_present = [mac for mac in mac_list if mac in remaining_macs]
+        
+        if still_present:
+            # Batch delete didn't work for some devices, fall back to individual deletes
+            import sys
+            print(f"[WARN] Batch forget incomplete ({len(still_present)} devices still exist), falling back to individual forgets...", file=sys.stderr)
+            
+            success_count = 0
+            for mac in still_present:
+                try:
+                    if forget_client(mac):
+                        success_count += 1
+                except Exception:
+                    pass
+            
+            # If all were deleted now, mark as success
+            if success_count == len(still_present):
+                results["success"] = True
+            else:
+                # Some still couldn't be deleted
+                results["success"] = False
+        else:
+            # Batch delete succeeded, all clients are gone
+            results["success"] = True
+            
+        return results
+        
+    except (Exception, json.JSONDecodeError) as e:
+        # If batch call itself fails, fall back to individual forgets
+        import sys
+        print(f"[WARN] Batch forget failed ({e}), falling back to individual forgets...", file=sys.stderr)
+        
+        success_count = 0
+        for mac in mac_list:
+            try:
+                if forget_client(mac):
+                    success_count += 1
+            except Exception:
+                pass
+        
+        # If at least most succeeded, mark as success
+        if success_count == len(mac_list):
+            results["success"] = True
+        return results
 
 def block_client(mac: str) -> bool:
     """
@@ -927,17 +1117,72 @@ def enable_ap(ap_mac: str) -> bool:
 
 
 def _get_ap_state_description(state):
-    """Convert UniFi AP state code to human-readable description."""
+    """Convert AP state to human-readable description. 
+    Note: get_ap_state() now returns strings directly, but this function
+    provides backward compatibility for integer codes if needed.
+    """
+    if isinstance(state, str):
+        # If already a string from get_ap_state(), return as-is
+        return state
+    
+    # Backward compatibility for integer state codes
     state_map = {
         0: "DISCONNECTED",
         1: "CONNECTING/INITIALIZING",
         2: "CONNECTED (but not fully ready)",
         3: "RUNNING",
-        "RUN": "RUNNING",
     }
-    if isinstance(state, (int, str)):
-        return state_map.get(state, f"UNKNOWN (code: {state})")
-    return "UNKNOWN"
+    return state_map.get(state, f"UNKNOWN")
+
+
+def get_ap_state(ap_mac: str) -> str:
+    """
+    Get the current state of an AP by MAC address.
+    Uses intelligent inference from multiple fields (uptime, last_seen, adopted status)
+    rather than relying solely on the unreliable 'state' field.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP
+        
+    Returns:
+        str: AP state description ("RUNNING", "DISCONNECTED", "INITIALIZING", etc.)
+             Returns "UNKNOWN" if AP not found
+    """
+    try:
+        devices = get_devices()
+        target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
+        
+        for device in devices:
+            if device.get("type") == "uap":
+                device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
+                if device_mac == target_mac_lower:
+                    # Intelligent state determination:
+                    # 1. Check if AP is adopted (adopted=true means it's connected to controller)
+                    is_adopted = device.get("adopted", False)
+                    if not is_adopted:
+                        return "DISCONNECTED"
+                    
+                    # 2. Check uptime - if uptime > 0, AP is running
+                    uptime_seconds = device.get("uptime", 0)
+                    if uptime_seconds and uptime_seconds > 0:
+                        return "RUNNING"
+                    
+                    # 3. Check if recently seen (within last 30 seconds)
+                    import time
+                    current_time = time.time()
+                    last_seen = device.get("last_seen", 0)
+                    if last_seen and (current_time - last_seen) < 30:
+                        return "RUNNING"
+                    
+                    # 4. If adopted but no uptime/recent activity, might be initializing
+                    if is_adopted:
+                        return "CONNECTING/INITIALIZING"
+                    
+                    return "DISCONNECTED"
+        
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
 
 
 def check_ap_upgrade_status(ap_mac: str) -> dict:
@@ -992,10 +1237,9 @@ def check_ap_upgrade_status(ap_mac: str) -> dict:
         # Check for potential issues
         issues = []
         
-        # State should be RUN or "RUN" or 3
-        if ap_state not in ["RUN", 3]:
-            state_desc = _get_ap_state_description(ap_state)
-            issues.append(f"AP is not in RUN state (current: {ap_state} - {state_desc}). AP may need to finish boot/initialization before upgrade.")
+        # State should be RUNNING
+        if ap_state != "RUNNING":
+            issues.append(f"AP is not in RUNNING state (current: {ap_state}). AP may need to finish boot/initialization before upgrade.")
         
         if not matching_ap.get("adopted"):
             issues.append("AP is not adopted by the controller")
@@ -1200,3 +1444,23 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
             "new_version": None,
             "message": f"Error during firmware upgrade operation: {e}"
         }
+
+
+def get_ap_current_version(ap_mac: str) -> str:
+    """
+    Get the current firmware version of an AP.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP
+    
+    Returns:
+        str: The current firmware version, or None if not found
+    """
+    try:
+        devices = get_devices()
+        for device in devices:
+            if device.get("mac", "").lower() == ap_mac.lower():
+                return device.get("version")
+        return None
+    except Exception:
+        return None

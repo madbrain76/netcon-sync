@@ -501,8 +501,14 @@ description       # Device description
 status            # Online/Offline
 ip                # IP address
 dns_name          # DNS name
+uptime            # How long the device has been connected
 connected_ap_name # Name of the AP it's connected to
 connected_ap_mac  # MAC of the AP it's connected to
+channel           # Wireless channel the device is using
+band              # WiFi band (2.4 GHz, 5 GHz, 6 GHz)
+wifi_generation   # WiFi generation (WiFi 1, 2, 3, 4, 5, 6, 7)
+ieee_version      # IEEE standard (802.11a, b, g, n, ac, ax, be)
+ssid              # Network SSID the device is connected to
 signal            # Signal strength in dBm
 retries           # TX retry count
 locked            # Yes/No - whether it's locked to an AP
@@ -510,6 +516,8 @@ locked_ap_name    # Name of the AP it's locked to
 locked_ap_mac     # MAC of the AP it's locked to
 last_seen         # Last time it was seen
 ```
+
+**Sorting Note**: N/A values always sort to the end, regardless of column or sort direction.
 
 **Examples**:
 
@@ -522,6 +530,15 @@ last_seen         # Last time it was seen
 
 # Show signal strength info only
 ./unifi_climgr.py list --clients +hostname +signal +connected_ap_name
+
+# Show channel and SSID information
+./unifi_climgr.py list --clients +hostname +channel +ssid +signal
+
+# Show WiFi generation and IEEE version
+./unifi_climgr.py list --clients +hostname +band +wifi_generation +ieee_version
+
+# Show all wireless info
+./unifi_climgr.py list --clients +hostname +channel +band +wifi_generation +ieee_version +ssid +signal
 ```
 
 ### Available Columns for APs
