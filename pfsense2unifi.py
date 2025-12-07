@@ -405,9 +405,9 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
             for client in results["updated"]:
                 changes = []
                 if client["old_name"] != client["new_name"]:
-                    changes.append(f"name: {client['old_name']} → {client['new_name']}")
+                    changes.append(f"name: {client['old_name']} -> {client['new_name']}")
                 if client["old_note"] != client["new_note"]:
-                    changes.append(f"note: {client['old_note']} → {client['new_note']}")
+                    changes.append(f"note: {client['old_note']} -> {client['new_note']}")
                 if changes:
                     change_str = ", ".join(changes)
                     print(f"  {client['mac']} ({change_str})... [OK]")

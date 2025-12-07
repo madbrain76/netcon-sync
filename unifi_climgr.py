@@ -957,7 +957,7 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
         extra_macs = current_macs - desired_macs
         
         if missing_macs or extra_macs:
-            print(f"\n✗ Device list mismatch:")
+            print(f"\n[FAIL] Device list mismatch:")
             if missing_macs:
                 print(f"  Missing APs in current system: {', '.join(sorted(missing_macs))}")
             if extra_macs:
@@ -987,14 +987,14 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
             })
     
     if name_mismatches:
-        print(f"\n✗ AP name mismatches detected:")
+        print(f"\n[FAIL] AP name mismatches detected:")
         for mismatch in name_mismatches:
             print(f"  {mismatch['mac']}: desired='{mismatch['desired']}' vs current='{mismatch['current']}'")
         print("\nAborted: AP names in desired topology do not match current system.")
         print("Please update your topology file to match current AP names.")
         sys.exit(1)
     
-    print("✓ Topology validation passed (MACs and names match)")
+    print("[OK] Topology validation passed (MACs and names match)")
     
     check_interval = 5  # 5 seconds
     timeout_seconds = timeout_minutes * 60
@@ -1074,12 +1074,12 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
             print(f"Initial parking status: {len(correct_aps)} correct, {len(incorrect_aps)} incorrect")
             
             if correct_aps:
-                print(f"\n✓ Correctly Parked & Online ({len(correct_aps)}):")
+                print(f"\n[OK] Correctly Parked & Online ({len(correct_aps)}):")
                 for ap in correct_aps:
                     print(f"  {ap['name']} ({ap['mac']}): {ap['current']} - [{ap['state']}]")
             
             if incorrect_aps:
-                print(f"\n✗ Incorrectly Parked or Offline ({len(incorrect_aps)}):")
+                print(f"\n[FAIL] Incorrectly Parked or Offline ({len(incorrect_aps)}):")
                 for ap in incorrect_aps:
                     print(f"  {ap['name']} ({ap['mac']}) [{ap['state']}]")
                     print(f"    Current: {ap['current']}")
@@ -1161,9 +1161,9 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
         if all_correctly_parked:
             elapsed = time.time() - start_time
             if topology_changed:
-                print(f"\n✓ Mesh topology fully rebuilt in {elapsed:.0f}s!")
+                print(f"\n[OK] Mesh topology fully rebuilt in {elapsed:.0f}s!")
             else:
-                print(f"\n✓ All APs already correctly parked (topology unchanged)")
+                print(f"\n[OK] All APs already correctly parked (topology unchanged)")
             print(f"  All {correctly_parked_count} APs correctly parked and in RUNNING state")
             return
         
@@ -1239,19 +1239,19 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
         else:
             incorrect_aps.append(ap_info)
     
-    print(f"\n⚠ Timeout after {elapsed:.0f}s ({timeout_minutes_display} minutes)")
+    print(f"\n[WARNING] Timeout after {elapsed:.0f}s ({timeout_minutes_display} minutes)")
     print(f"Final status: {len(correct_aps)} correctly parked, {len(incorrect_aps)} parking violations")
     print(f"AP states: {running_count} running, {not_running_count} not running")
     
     # Display correctly parked APs
     if correct_aps:
-        print(f"\n✓ Correctly Parked & Online ({len(correct_aps)}):")
+        print(f"\n[OK] Correctly Parked & Online ({len(correct_aps)}):")
         for ap in correct_aps:
             print(f"  {ap['name']} ({ap['mac']}): {ap['current']} - [{ap['state']}]")
     
     # Display incorrectly parked or offline APs
     if incorrect_aps:
-        print(f"\n✗ Incorrectly Parked or Offline ({len(incorrect_aps)}):")
+        print(f"\n[FAIL] Incorrectly Parked or Offline ({len(incorrect_aps)}):")
         for ap in incorrect_aps:
             print(f"  {ap['name']} ({ap['mac']}) [{ap['state']}]")
             print(f"    Current: {ap['current']}")
@@ -2995,19 +2995,19 @@ EXAMPLES:
                                 print(f"  {ap_name}... ", end="", flush=True)
                                 if result.get('new_version') and result['current_version'] != result['new_version']:
                                     if dry_run:
-                                        print(f"[UPGRADABLE] {current} → {new}")
+                                        print(f"[UPGRADABLE] {current} -> {new}")
                                     else:
                                         # Get initial state before the upgrade was initiated
                                         initial_state = unifi_utils.get_ap_state(ap_mac)
                                         
                                         initiation_time = time.time()
                                         initiation_time_str = datetime.now().strftime("%H:%M:%S")
-                                        print(f"[INITIATING] {current} → {new} at {initiation_time_str}")
+                                        print(f"[INITIATING] {current} -> {new} at {initiation_time_str}")
                                         
                                         # Verify upgrade state change
                                         verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
                                         if verify_result['success']:
-                                            print(f"  ✓ State change confirmed: {initial_state} → {verify_result['final_state']}\n")
+                                            print(f"  [OK] State change confirmed: {initial_state} -> {verify_result['final_state']}\n")
                                             # Track this AP for monitoring
                                             aps_upgrading[ap_mac] = {
                                                 "name": ap_name,
@@ -3017,7 +3017,7 @@ EXAMPLES:
                                             ap_initiation_times[ap_mac] = initiation_time
                                             layer_has_upgrade = True
                                         else:
-                                            print(f"  ✗ {verify_result['message']}\n")
+                                            print(f"  [FAIL] {verify_result['message']}\n")
                                         
                                         # Add configurable delay after each upgrade initiation attempt (only if successful)
                                         if verify_result['success']:
@@ -3055,7 +3055,7 @@ EXAMPLES:
                         
                         # Check timeout
                         if elapsed > timeout_seconds:
-                            print(f"\n⏱️  Upgrade monitoring timeout ({timeout_minutes} minute(s) elapsed)")
+                            print(f"\n[TIME]  Upgrade monitoring timeout ({timeout_minutes} minute(s) elapsed)")
                             remaining = [mac for mac in aps_upgrading if mac not in completed_aps]
                             if remaining:
                                 print(f"The following APs may still be upgrading:")
@@ -3084,12 +3084,12 @@ EXAMPLES:
                                     duration_secs = int(duration_seconds % 60)
                                     
                                     completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
-                                    print(f"✅ Successful upgrade: {ap_info['name']} → {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
+                                    print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
                         
                         # Check for no progress in 60 seconds and show AP states
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
                             no_progress_displayed = True
-                            print(f"\n⏳ No progress in the last minute. Showing status of APs still upgrading:\n")
+                            print(f"\n[WAIT] No progress in the last minute. Showing status of APs still upgrading:\n")
                             
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
@@ -3098,7 +3098,7 @@ EXAMPLES:
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
                                     current_version = unifi_utils.get_ap_current_version(ap_mac)
                                     target_version = ap_info['target_version']
-                                    print(f"  {ap_info['name']}: {current_version} → {target_version} (state: {state_desc} [{ap_state}])")
+                                    print(f"  {ap_info['name']}: {current_version} -> {target_version} (state: {state_desc} [{ap_state}])")
                             
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
@@ -3109,11 +3109,11 @@ EXAMPLES:
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
                             remaining_seconds = int(remaining_timeout % 60)
-                            print(f"⏳ Waiting {remaining_minutes}m:{remaining_seconds:02d}s until timeout...", flush=True)
+                            print(f"[WAIT] Waiting {remaining_minutes}m:{remaining_seconds:02d}s until timeout...", flush=True)
                         
                         # If all APs upgraded, exit
                         if len(completed_aps) == len(aps_upgrading):
-                            print(f"\n🎉 All {len(completed_aps)} AP(s) upgraded successfully!")
+                            print(f"\n[SUCCESS] All {len(completed_aps)} AP(s) upgraded successfully!")
                             break
                         
                         # Sleep before next check
@@ -3143,19 +3143,19 @@ EXAMPLES:
                             print(f"  {ap_name}... ", end="")
                             if result.get('new_version') and result['current_version'] != result['new_version']:
                                 if dry_run:
-                                    print(f"[UPGRADABLE] {current} → {new}")
+                                    print(f"[UPGRADABLE] {current} -> {new}")
                                 else:
                                     # Get initial state before the upgrade was initiated
                                     initial_state = unifi_utils.get_ap_state(ap_mac)
                                     
                                     initiation_time = time.time()
                                     initiation_time_str = datetime.now().strftime("%H:%M:%S")
-                                    print(f"[INITIATING] {current} → {new} at {initiation_time_str}")
+                                    print(f"[INITIATING] {current} -> {new} at {initiation_time_str}")
                                     
                                     # Verify upgrade state change
                                     verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
                                     if verify_result['success']:
-                                        print(f"  ✓ State change confirmed: {initial_state} → {verify_result['final_state']}\n")
+                                        print(f"  [OK] State change confirmed: {initial_state} -> {verify_result['final_state']}\n")
                                         # Track this AP for monitoring
                                         aps_upgrading[ap_mac] = {
                                             "name": ap_name,
@@ -3164,7 +3164,7 @@ EXAMPLES:
                                         }
                                         ap_initiation_times[ap_mac] = initiation_time
                                     else:
-                                        print(f"  ✗ {verify_result['message']}\n")
+                                        print(f"  [FAIL] {verify_result['message']}\n")
                             else:
                                 print(f"(already latest)")
                         else:
@@ -3196,7 +3196,7 @@ EXAMPLES:
                         
                         # Check timeout
                         if elapsed > timeout_seconds:
-                            print(f"\n⏱️  Upgrade monitoring timeout ({timeout_minutes} minute(s) elapsed)")
+                            print(f"\n[TIME]  Upgrade monitoring timeout ({timeout_minutes} minute(s) elapsed)")
                             remaining = [mac for mac in aps_upgrading if mac not in completed_aps]
                             if remaining:
                                 print(f"The following APs may still be upgrading:")
@@ -3225,12 +3225,12 @@ EXAMPLES:
                                     duration_secs = int(duration_seconds % 60)
                                     
                                     completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
-                                    print(f"✅ Successful upgrade: {ap_info['name']} → {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
+                                    print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
                         
                         # Check for no progress in 60 seconds and show AP states
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
                             no_progress_displayed = True
-                            print(f"\n⏳ No progress in the last minute. Showing status of APs still upgrading:\n")
+                            print(f"\n[WAIT] No progress in the last minute. Showing status of APs still upgrading:\n")
                             
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
@@ -3239,7 +3239,7 @@ EXAMPLES:
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
                                     current_version = unifi_utils.get_ap_current_version(ap_mac)
                                     target_version = ap_info['target_version']
-                                    print(f"  {ap_info['name']}: {current_version} → {target_version} (state: {state_desc} [{ap_state}])")
+                                    print(f"  {ap_info['name']}: {current_version} -> {target_version} (state: {state_desc} [{ap_state}])")
                             
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
@@ -3250,11 +3250,11 @@ EXAMPLES:
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
                             remaining_seconds = int(remaining_timeout % 60)
-                            print(f"⏳ Waiting {remaining_minutes}m:{remaining_seconds:02d}s until timeout...", flush=True)
+                            print(f"[WAIT] Waiting {remaining_minutes}m:{remaining_seconds:02d}s until timeout...", flush=True)
                         
                         # If all APs upgraded, exit
                         if len(completed_aps) == len(aps_upgrading):
-                            print(f"\n🎉 All {len(completed_aps)} AP(s) upgraded successfully!")
+                            print(f"\n[SUCCESS] All {len(completed_aps)} AP(s) upgraded successfully!")
                             break
                         
                         # Sleep before next check
@@ -3314,11 +3314,11 @@ EXAMPLES:
                 print(f"Last Seen: {status.get('last_seen')}")
                 
                 if status.get("issues"):
-                    print(f"\n⚠️  Issues found:")
+                    print(f"\n[WARNING] Issues found:")
                     for issue in status.get("issues"):
                         print(f"  - {issue}")
                     
-                    print(f"\n💡 Recommendations:")
+                    print(f"\n[NOTE] Recommendations:")
                     state = status.get('state')
                     if state == "CONNECTING/INITIALIZING":
                         print(f"  - The AP is in INITIALIZING state, possibly stuck")
@@ -3333,7 +3333,7 @@ EXAMPLES:
                         print(f"  - The AP is not adopted by the controller")
                         print(f"  - You need to adopt it first before upgrading")
                 else:
-                    print("\n✓ No obvious issues detected")
+                    print("\n[OK] No obvious issues detected")
             else:
                 print(f"Error: {status.get('message')}")
             
@@ -3376,7 +3376,7 @@ EXAMPLES:
                 with open(output_file, 'w') as f:
                     f.write(json_str)
                 
-                print(f"✓ Topology saved to: {output_file}")
+                print(f"[OK] Topology saved to: {output_file}")
                 print(f"  APs: {len(aps)}\n")
                 
                 # Display tree view
@@ -3473,7 +3473,7 @@ EXAMPLES:
                 for ssid in matching_ssids:
                     ssid_name = ssid.get("name", "Unknown")
                     is_enabled_before = "Yes" if ssid.get("enabled", False) else "No"
-                    print(f"  {ssid_name} (enabled: {is_enabled_before} → ", end="", flush=True)
+                    print(f"  {ssid_name} (enabled: {is_enabled_before} -> ", end="", flush=True)
                     if unifi_utils.enable_ssid(ssid_name):
                         print(f"Yes)... [OK]")
                     else:
@@ -3517,7 +3517,7 @@ EXAMPLES:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     ap_mac = ap.get("mac", "N/A")
                     is_enabled_before = "Yes" if not ap.get("disabled", False) else "No"
-                    print(f"  {ap_name} (enabled: {is_enabled_before} → ", end="", flush=True)
+                    print(f"  {ap_name} (enabled: {is_enabled_before} -> ", end="", flush=True)
                     if unifi_utils.enable_ap(ap_mac):
                         print(f"Yes)... [OK]")
                     else:
@@ -3558,7 +3558,7 @@ EXAMPLES:
                 for ssid in matching_ssids:
                     ssid_name = ssid.get("name", "Unknown")
                     is_enabled_before = "Yes" if ssid.get("enabled", False) else "No"
-                    print(f"  {ssid_name} (enabled: {is_enabled_before} → ", end="", flush=True)
+                    print(f"  {ssid_name} (enabled: {is_enabled_before} -> ", end="", flush=True)
                     if unifi_utils.disable_ssid(ssid_name):
                         print(f"No)... [OK]")
                     else:
@@ -3602,7 +3602,7 @@ EXAMPLES:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     ap_mac = ap.get("mac", "N/A")
                     is_enabled_before = "Yes" if not ap.get("disabled", False) else "No"
-                    print(f"  {ap_name} (enabled: {is_enabled_before} → ", end="", flush=True)
+                    print(f"  {ap_name} (enabled: {is_enabled_before} -> ", end="", flush=True)
                     if unifi_utils.disable_ap(ap_mac):
                         print(f"No)... [OK]")
                     else:
