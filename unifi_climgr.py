@@ -2931,12 +2931,39 @@ EXAMPLES:
                 # Upgrade all APs
                 aps_to_upgrade = aps
             
+            # Run pre-upgrade health check (always run to detect already-upgrading APs)
+            already_upgrading_aps = []  # Initialize to empty
+            health_result = unifi_utils.check_ap_health_before_upgrade(aps_to_upgrade)
+            if not health_result['success']:
+                print(f"Error: {health_result['message']}")
+                print(f"\nTo proceed, wait for the AP(s) to complete initialization, then try again.")
+                sys.exit(1)
+            print(health_result['message'])
+            
+            already_upgrading_aps = health_result['already_upgrading']
+            # Use only ready APs for upgrade (already upgrading ones will be monitored but not re-initiated)
+            aps_to_upgrade = health_result['ready_aps']
+            
+            if not aps_to_upgrade and not already_upgrading_aps:
+                print("Error: No APs ready for upgrade")
+                sys.exit(1)
+            
+            if already_upgrading_aps:
+                if args.actual_upgrade:
+                    print(f"\nNote: {len(already_upgrading_aps)} AP(s) already upgrading, monitoring only")
+                # Add already upgrading APs back to the full list for monitoring, but not for initiation
+                # We'll track them separately in the upgrade process
+            
             # Display the mesh topology before upgrading (only if more than one AP)
-            if len(aps_to_upgrade) > 1:
-                display_ap_tree(aps_to_upgrade, all_devices)
+            # Show topology of all APs (ready + already upgrading)
+            aps_for_tree_display = aps_to_upgrade + already_upgrading_aps
+            if len(aps_for_tree_display) > 1:
+                display_ap_tree(aps_for_tree_display, all_devices)
             
             # Check if there are any mesh APs (depth >= 1)
-            depths = calculate_ap_mesh_depths(aps_to_upgrade)
+            # Calculate depths for ALL APs (ready + already upgrading) so we don't mark upgrading APs as orphans
+            all_aps_for_depth = aps_to_upgrade + already_upgrading_aps
+            depths = calculate_ap_mesh_depths(all_aps_for_depth)
             has_mesh_aps = any(depth >= 1 for depth in depths.values())
             
             # Use mesh-ordered upgrade if there are mesh APs and we're upgrading all APs (not a specific one)
@@ -2945,24 +2972,44 @@ EXAMPLES:
             dry_run = not args.actual_upgrade  # Default is dry run
             mode_str = "[ACTUAL]" if args.actual_upgrade else "[DRY RUN]"
             
+            # Initialize upgrade tracking (unified for both mesh and standard paths)
+            import time
+            from datetime import datetime
+            
+            upgrade_session_start = time.time()
+            start_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Track APs being upgraded (MAC -> target version -> initiation_time)
+            aps_upgrading = {}
+            ap_initiation_times = {}
+            
+            # Pre-populate with already upgrading APs (so they get monitored regardless of path)
+            for ap in already_upgrading_aps:
+                ap_mac = ap.get("mac")
+                ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                upgrade_to = ap.get("upgrade_to_firmware", "Unknown")
+                if ap_mac:
+                    aps_upgrading[ap_mac] = {
+                        'name': ap_name,
+                        'target_version': upgrade_to
+                    }
+                    # Use current time as initiation (they started before this script)
+                    ap_initiation_times[ap_mac] = time.time()
+            
             if use_mesh_order and not args.ap_mac and not args.ap_name:
-                import time
-                from datetime import datetime
-                
-                # Record upgrade session start time
-                upgrade_session_start = time.time()
-                start_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"\n{mode_str} Initiating firmware upgrades for {len(aps_to_upgrade)} AP(s) in mesh order (leaf to parent)...")
+                # Print message including already upgrading APs
+                if already_upgrading_aps:
+                    print(f"\n{mode_str} Initiating firmware upgrades for {len(aps_to_upgrade)} AP(s), monitoring {len(already_upgrading_aps)} already-upgrading...")
+                else:
+                    print(f"\n{mode_str} Initiating firmware upgrades for {len(aps_to_upgrade)} AP(s) in mesh order (leaf to parent)...")
                 print(f"Started at: {start_time_str}\n")
                 print("Note: Upgrades are queued and will be processed by the APs. Monitoring progress...\n")
                 
-                # Track APs being upgraded (MAC -> target version -> initiation_time)
-                aps_upgrading = {}
-                ap_initiation_times = {}
-                
-                # Group APs by depth
+                # Group APs by depth (include both ready_aps and already_upgrading_aps for display)
                 aps_by_depth = defaultdict(list)
-                for ap in aps_to_upgrade:
+                already_upgrading_macs = {ap.get("mac") for ap in already_upgrading_aps if ap.get("mac")}
+                
+                for ap in aps_to_upgrade + already_upgrading_aps:
                     ap_mac = ap.get("mac")
                     depth = depths.get(ap_mac, -1)
                     aps_by_depth[depth].append(ap)
@@ -2990,6 +3037,11 @@ EXAMPLES:
                         ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                         ap_mac = ap.get("mac")
                         if ap_mac:
+                            # Skip APs already upgrading - they're already in aps_upgrading dict
+                            if ap_mac in aps_upgrading:
+                                print(f"  {ap_name}... [ALREADY UPGRADING]")
+                                continue
+                            
                             result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=dry_run)
                             if result['success']:
                                 current = result.get('current_version', 'Unknown')
@@ -3011,23 +3063,23 @@ EXAMPLES:
                                         upgrade_success = False
                                         
                                         if verify_result['success']:
-                                            print(f"  [OK] Upgrade detected: {verify_result['message']}\n")
+                                            print(f"  [OK] Upgrade detected: {verify_result['message']}\n", flush=True)
                                             upgrade_success = True
                                         else:
                                             # Initial attempt failed, retry the upgrade command once
-                                            print(f"  [WAIT] No active upgrade in 120s, retrying upgrade command...")
+                                            print(f"  [WAIT] No active upgrade in 30s, retrying upgrade command...", flush=True)
                                             retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
                                             if retry_result['success']:
                                                 # Check for upgrade activity again after retry
                                                 retry_initial_state = unifi_utils.get_ap_state(ap_mac)
                                                 retry_verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, retry_initial_state)
                                                 if retry_verify_result['success']:
-                                                    print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n")
+                                                    print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n", flush=True)
                                                     upgrade_success = True
                                                 else:
-                                                    print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n")
+                                                    print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n", flush=True)
                                             else:
-                                                print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n")
+                                                print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n", flush=True)
                                         
                                         # Only track if upgrade was successful
                                         if upgrade_success:
@@ -3038,20 +3090,14 @@ EXAMPLES:
                                             }
                                             ap_initiation_times[ap_mac] = initiation_time
                                             layer_has_upgrade = True
-                                        
-                                        # Add configurable delay after each upgrade initiation attempt (only if successful)
-                                        if verify_result['success']:
-                                            print(f"  Waiting {args.ap_upgrade_delay} seconds before next AP...\n")
-                                            time.sleep(args.ap_upgrade_delay)
                                 else:
                                     print(f"(already latest)")
                             else:
                                 print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
                     
-                    # Add configurable delay between layers (but not after the last layer, in dry run mode, or if no APs upgraded in this layer)
+                    # Add configurable delay between layers (but not after the last layer or in dry run mode)
                     if i < len(sorted_depths) - 1 and not dry_run and layer_has_upgrade:
-                        print(f"  Waiting {args.layer_upgrade_delay} seconds before next layer...\n")
-                        time.sleep(args.layer_upgrade_delay)
+                        pass  # No delay between layers for speed
                 
                 # Monitor upgrade progress (only in actual mode and if we have APs to monitor)
                 if not dry_run and aps_upgrading:
@@ -3162,18 +3208,22 @@ EXAMPLES:
                         # Sleep before next check
                         time.sleep(check_interval)
                 
-                print(f"\n{mode_str} All APs processed.")
+                # Display total execution time
+                upgrade_session_end = time.time()
+                total_duration = upgrade_session_end - upgrade_session_start
+                total_minutes = int(total_duration // 60)
+                total_seconds = int(total_duration % 60)
+                print(f"\nTotal execution time: {total_minutes}m:{total_seconds:02d}s")
+            
             else:
                 # Standard upgrade without mesh ordering
-                upgrade_session_start = time.time()
-                start_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"\n{mode_str} Upgrading {len(aps_to_upgrade)} AP(s)...")
+                # Print message including already upgrading APs
+                if already_upgrading_aps:
+                    print(f"\n{mode_str} Upgrading {len(aps_to_upgrade)} AP(s), monitoring {len(already_upgrading_aps)} already-upgrading...")
+                else:
+                    print(f"\n{mode_str} Upgrading {len(aps_to_upgrade)} AP(s)...")
                 print(f"Started at: {start_time_str}\n")
                 print("Note: Upgrades are queued and will be processed by the APs. Monitoring progress...\n")
-                
-                # Track APs being upgraded (MAC -> target version -> initiation_time)
-                aps_upgrading = {}
-                ap_initiation_times = {}
                 
                 for ap in aps_to_upgrade:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
@@ -3191,14 +3241,15 @@ EXAMPLES:
                             devices = unifi_utils.get_devices()
                             for device in devices:
                                 if device.get("mac", "").lower() == ap_mac.lower():
+                                    upgrade_progress = device.get("upgrade_progress")
                                     upgrade_state = device.get("upgrade_state")
-                                    upgrade_triggered_by = device.get("upgrade_triggered_by")
-                                    state = device.get("state")
+                                    current_version = device.get("version", "")
+                                    target_version = device.get("upgrade_to_firmware", "")
                                     
                                     # Check if upgrade is already active
-                                    # upgrade_state > 0 means upgrade is in progress
-                                    # upgrade_triggered_by being set also indicates active upgrade
-                                    if (upgrade_state and upgrade_state > 0) or upgrade_triggered_by:
+                                    # upgrade_progress > 0 OR upgrade_state > 0 with a different target version
+                                    if ((upgrade_progress and upgrade_progress > 0) or 
+                                        (upgrade_state and upgrade_state > 0 and target_version and target_version != current_version)):
                                         print(f"[OK] Upgrade already in progress (detected from controller)\n")
                                         ap_already_upgrading = True
                                         # Track this AP for monitoring
@@ -3238,23 +3289,23 @@ EXAMPLES:
                                     upgrade_success = False
                                     
                                     if verify_result['success']:
-                                        print(f"  [OK] Upgrade detected: {verify_result['message']}\n")
+                                        print(f"  [OK] Upgrade detected: {verify_result['message']}\n", flush=True)
                                         upgrade_success = True
                                     else:
                                         # Initial attempt failed, retry the upgrade command once
-                                        print(f"  [WAIT] No upgrade activity in 60s, retrying upgrade command...")
+                                        print(f"  [WAIT] No active upgrade in 30s, retrying upgrade command...", flush=True)
                                         retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
                                         if retry_result['success']:
                                             # Check for upgrade activity again after retry
                                             retry_initial_state = unifi_utils.get_ap_state(ap_mac)
                                             retry_verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, retry_initial_state)
                                             if retry_verify_result['success']:
-                                                print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n")
+                                                print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n", flush=True)
                                                 upgrade_success = True
                                             else:
-                                                print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n")
+                                                print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n", flush=True)
                                         else:
-                                            print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n")
+                                            print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n", flush=True)
                                     
                                     # Only track if upgrade was successful
                                     if upgrade_success:
@@ -3375,6 +3426,15 @@ EXAMPLES:
                         
                         # Sleep before next check
                         time.sleep(check_interval)
+                
+                # Display total execution time
+                upgrade_session_end = time.time()
+                total_duration = upgrade_session_end - upgrade_session_start
+                total_minutes = int(total_duration // 60)
+                total_seconds = int(total_duration % 60)
+                print(f"\nTotal execution time: {total_minutes}m:{total_seconds:02d}s")
+            
+            # Exit after upgrade to prevent falling through to client action handlers
             sys.exit(0)
         
         # =====================================================================

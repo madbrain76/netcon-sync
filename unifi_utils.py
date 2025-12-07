@@ -1185,6 +1185,225 @@ def get_ap_state(ap_mac: str) -> str:
         return "UNKNOWN"
 
 
+def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int = 300) -> dict:
+    """
+    Pre-upgrade health check: Verify all APs are in a state ready for upgrade.
+    
+    Checks that all APs are either idle (RUNNING, no active upgrade) or already upgrading.
+    APs already upgrading are returned separately so they are NOT re-initiated.
+    If any AP is in "CONNECTING/INITIALIZING" state (getting ready), waits for it to
+    transition to RUNNING state before proceeding.
+    
+    Args:
+        aps_to_upgrade (list): List of AP dicts with at least 'mac' and 'name' fields
+        max_wait_seconds (int): Maximum time to wait for APs to reach RUNNING state (default 300s = 5 min)
+    
+    Returns:
+        dict: {
+            "success": bool,
+            "ready_aps": list of APs ready for NEW upgrade (in original order),
+            "already_upgrading": list of APs already upgrading (should not re-initiate),
+            "unhealthy_aps": list of APs that never reached RUNNING state or in bad states,
+            "message": str describing the result
+        }
+    """
+    import time
+    
+    if not aps_to_upgrade:
+        return {
+            "success": True,
+            "healthy_aps": [],
+            "unhealthy_aps": [],
+            "message": "No APs to check"
+        }
+    
+    print("\n[PRE-UPGRADE HEALTH CHECK]")
+    print(f"Verifying {len(aps_to_upgrade)} AP(s) are ready for upgrade...\n")
+    
+    # Get full device list to check upgrade states
+    all_devices = get_devices()
+    device_map = {}  # MAC -> full device dict
+    for device in all_devices:
+        if device.get("type") == "uap":
+            device_map[device.get("mac", "").lower()] = device
+    
+    # Track status by MAC address to preserve original order in final result
+    ap_status = {}  # MAC -> {'ap': ap_dict, 'category': 'ready'|'already_upgrading'|'unhealthy'|'waiting'}
+    aps_needing_wait = []
+    
+    # First pass: identify which APs need waiting
+    for ap in aps_to_upgrade:
+        ap_mac = ap.get("mac")
+        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+        
+        if not ap_mac:
+            continue
+        
+        # Get full device data to check upgrade state
+        device = device_map.get(ap_mac.lower())
+        if not device:
+            print(f"  [WARN] {ap_name}: Device not found")
+            ap_status[ap_mac] = {'ap': ap, 'category': 'unhealthy'}
+            continue
+        
+        # Check if already upgrading
+        # Mark as upgrading if:
+        # 1. upgrade_progress > 0 (actively downloading/installing) OR
+        # 2. upgrade_state > 0 with a target version different from current (queued/started but not downloading yet)
+        # This avoids false positives by requiring target version to be different from current
+        upgrade_progress = device.get("upgrade_progress", 0)
+        upgrade_state = device.get("upgrade_state", 0)
+        current_version = device.get("version", "")
+        upgrade_to_version = device.get("upgrade_to_firmware", "")
+        
+        is_already_upgrading = (
+            (upgrade_progress and upgrade_progress > 0) or
+            (upgrade_state and upgrade_state > 0 and upgrade_to_version and upgrade_to_version != current_version)
+        )
+        
+        if is_already_upgrading:
+            # Store the upgrade details in the AP dict for later display
+            ap_status[ap_mac] = {'ap': ap, 'category': 'already_upgrading'}
+            
+            print(f"  [SKIP] {ap_name}: Already upgrading")
+            # Mark as already upgrading - DO NOT re-initiate upgrades on these
+            continue
+        
+        # Check if adopted and has uptime (means it's running)
+        is_adopted = device.get("adopted", False)
+        uptime_seconds = device.get("uptime", 0)
+        
+        if not is_adopted:
+            print(f"  [WARN] {ap_name}: Not adopted (disconnected)")
+            ap_status[ap_mac] = {'ap': ap, 'category': 'unhealthy'}
+        elif uptime_seconds and uptime_seconds > 0:
+            print(f"  [OK] {ap_name}: RUNNING (ready for upgrade)")
+            ap_status[ap_mac] = {'ap': ap, 'category': 'ready'}
+        else:
+            # Adopted but no uptime - likely initializing
+            print(f"  [WAIT] {ap_name}: INITIALIZING (waiting to be ready...)")
+            ap_status[ap_mac] = {'ap': ap, 'category': 'waiting'}
+            aps_needing_wait.append(ap_mac)
+    
+    # If any APs are still initializing, wait for them
+    if aps_needing_wait:
+        print(f"\nWaiting for {len(aps_needing_wait)} AP(s) to complete initialization (max {max_wait_seconds}s)...\n")
+        
+        start_time = time.time()
+        
+        while aps_needing_wait and (time.time() - start_time) < max_wait_seconds:
+            still_waiting = []
+            
+            # Re-fetch device data to get latest upgrade states
+            all_devices = get_devices()
+            device_map = {}
+            for device in all_devices:
+                if device.get("type") == "uap":
+                    device_map[device.get("mac", "").lower()] = device
+            
+            for ap_mac in aps_needing_wait:
+                ap = ap_status[ap_mac]['ap']
+                ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                
+                device = device_map.get(ap_mac.lower())
+                if not device:
+                    print(f"  [FAIL] {ap_name}: Device not found")
+                    ap_status[ap_mac]['category'] = 'unhealthy'
+                    continue
+                
+                elapsed = int(time.time() - start_time)
+                
+                # Check if it started upgrading while waiting
+                # Mark as upgrading if:
+                # 1. upgrade_progress > 0 OR
+                # 2. upgrade_state > 0 with a target version different from current
+                upgrade_progress = device.get("upgrade_progress", 0)
+                upgrade_state = device.get("upgrade_state", 0)
+                current_version = device.get("version", "")
+                upgrade_to_version = device.get("upgrade_to_firmware", "")
+                
+                is_upgrading = (
+                    (upgrade_progress and upgrade_progress > 0) or
+                    (upgrade_state and upgrade_state > 0 and upgrade_to_version and upgrade_to_version != current_version)
+                )
+                
+                if is_upgrading:
+                    print(f"  [SKIP] {ap_name}: Started upgrading while waiting ({elapsed}s)")
+                    ap_status[ap_mac]['category'] = 'already_upgrading'
+                    continue
+                
+                # Check if it now has uptime (ready to upgrade)
+                uptime_seconds = device.get("uptime", 0)
+                
+                if uptime_seconds and uptime_seconds > 0:
+                    print(f"  [OK] {ap_name}: Ready ({elapsed}s)")
+                    ap_status[ap_mac]['category'] = 'ready'
+                else:
+                    # Still waiting for uptime
+                    still_waiting.append(ap_mac)
+            
+            aps_needing_wait = still_waiting
+            
+            if aps_needing_wait:
+                # Print status line (without newline) to show waiting
+                ap_names = ", ".join(ap_status[mac]['ap'].get("name") or ap_status[mac]['ap'].get("model", "Unknown") for mac in aps_needing_wait)
+                elapsed = int(time.time() - start_time)
+                print(f"  Still waiting: {ap_names} ({elapsed}s of {max_wait_seconds}s)...", end="\r", flush=True)
+                time.sleep(5)
+        
+        # Clear the waiting message line
+        if aps_needing_wait:
+            print("  " * 50, end="\r")  # Clear the line
+        
+        # Any remaining APs that didn't transition are considered unhealthy
+        if aps_needing_wait:
+            ap_names = ", ".join(ap_status[mac]['ap'].get("name") or ap_status[mac]['ap'].get("model", "Unknown") for mac in aps_needing_wait)
+            print(f"  [TIMEOUT] {ap_names} did not reach RUNNING state after {max_wait_seconds}s")
+            for ap_mac in aps_needing_wait:
+                ap_status[ap_mac]['category'] = 'unhealthy'
+    
+    print()  # Blank line for readability
+    
+    # Build result lists preserving original order
+    ready_aps = []
+    already_upgrading = []
+    unhealthy_aps = []
+    
+    for ap in aps_to_upgrade:
+        ap_mac = ap.get("mac")
+        if ap_mac in ap_status:
+            category = ap_status[ap_mac]['category']
+            if category == 'ready':
+                ready_aps.append(ap)
+            elif category == 'already_upgrading':
+                already_upgrading.append(ap)
+            else:
+                unhealthy_aps.append(ap)
+    
+    # Summary
+    if unhealthy_aps:
+        ap_names = ", ".join(ap.get("name") or ap.get("model", "Unknown") for ap in unhealthy_aps)
+        return {
+            "success": False,
+            "ready_aps": ready_aps,
+            "already_upgrading": already_upgrading,
+            "unhealthy_aps": unhealthy_aps,
+            "message": f"Health check failed: {len(unhealthy_aps)} AP(s) not ready for upgrade: {ap_names}"
+        }
+    else:
+        total_healthy = len(ready_aps) + len(already_upgrading)
+        msg = f"Health check passed: {len(ready_aps)} ready for upgrade"
+        if already_upgrading:
+            msg += f", {len(already_upgrading)} already upgrading"
+        return {
+            "success": True,
+            "ready_aps": ready_aps,
+            "already_upgrading": already_upgrading,
+            "unhealthy_aps": [],
+            "message": msg
+        }
+
+
 def check_ap_upgrade_status(ap_mac: str) -> dict:
     """
     Check the upgrade status and health of an AP.
@@ -1450,7 +1669,7 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
     """
     Verifies that a firmware upgrade has been successfully initiated on an AP.
     Uses version change as the ground truth - if upgrade is really happening, version progresses.
-    Checks every 5 seconds for up to 120 seconds (2 minutes).
+    Checks every 5 seconds for up to 30 seconds.
     
     Args:
         ap_mac (str): The MAC address of the AP
@@ -1468,9 +1687,9 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
     # Get initial version before checking for changes
     initial_version = get_ap_current_version(ap_mac)
     
-    # Check every 5 seconds for up to 120 seconds (24 checks = 2 minutes)
+    # Check every 5 seconds for 30 seconds (6 checks)
     check_interval = 5  # seconds
-    max_checks = 24
+    max_checks = 6
     upgrade_detected = False
     final_state = initial_state
     
@@ -1485,29 +1704,26 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
                 if device.get("mac", "").lower() == ap_mac.lower():
                     current_state = device.get("state", initial_state)
                     current_version = device.get("version")
+                    upgrade_progress = device.get("upgrade_progress")
+                    upgrade_state = device.get("upgrade_state")
+                    target_version = device.get("upgrade_to_firmware", "")
                     
-                    # Check if version changed (most reliable indicator of upgrade activity)
+                    # Check for upgrade activity (in order of reliability):
+                    # 1. Version changed (most reliable - upgrade is progressing/completed)
                     if current_version and current_version != initial_version:
                         upgrade_detected = True
                         final_state = current_state
                         break
                     
-                    # Also check API upgrade fields as backup indicators
-                    upgrade_state = device.get("upgrade_state")
-                    upgrade_progress = device.get("upgrade_progress")
-                    upgrade_triggered_by = device.get("upgrade_triggered_by")
-                    
-                    if upgrade_state and upgrade_state > 0:
-                        upgrade_detected = True
-                        final_state = current_state
-                        break
-                    
+                    # 2. upgrade_progress > 0 (actively downloading/installing)
                     if upgrade_progress and upgrade_progress > 0:
                         upgrade_detected = True
                         final_state = current_state
                         break
                     
-                    if upgrade_triggered_by:
+                    # 3. upgrade_state > 0 with target version different from current
+                    # This indicates upgrade is queued/scheduled but not yet downloading
+                    if upgrade_state and upgrade_state > 0 and target_version and target_version != current_version:
                         upgrade_detected = True
                         final_state = current_state
                         break
@@ -1527,7 +1743,7 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
     else:
         return {
             "success": False,
-            "message": f"No upgrade activity detected after 120 seconds",
+            "message": f"No upgrade activity detected after 30 seconds",
             "final_state": initial_state
         }
 
@@ -1556,9 +1772,9 @@ def is_ap_actively_upgrading(ap_mac: str) -> bool:
     """
     Check if an AP is actively upgrading firmware.
     
-    Uses upgrade_state and upgrade_triggered_by fields to detect active upgrades.
-    upgrade_state > 0 means firmware upgrade is in progress.
-    upgrade_triggered_by field indicates an upgrade has been triggered.
+    Uses both upgrade_progress and upgrade_state with validation to detect active upgrades.
+    - upgrade_progress > 0 means firmware is downloading/installing
+    - upgrade_state > 0 with a target version different from current also indicates active upgrade
     
     Args:
         ap_mac (str): The MAC address of the AP
@@ -1570,13 +1786,18 @@ def is_ap_actively_upgrading(ap_mac: str) -> bool:
         devices = get_devices()
         for device in devices:
             if device.get("mac", "").lower() == ap_mac.lower():
-                # Check if upgrade is active (upgrade_state > 0)
+                upgrade_progress = device.get("upgrade_progress")
                 upgrade_state = device.get("upgrade_state")
-                if upgrade_state and upgrade_state > 0:
+                current_version = device.get("version", "")
+                target_version = device.get("upgrade_to_firmware", "")
+                
+                # upgrade_progress > 0 = actively downloading/installing
+                if upgrade_progress and upgrade_progress > 0:
                     return True
                 
-                # Check if upgrade was triggered (upgrade_triggered_by field set)
-                if device.get("upgrade_triggered_by"):
+                # upgrade_state > 0 with a different target version = upgrade in progress
+                # This avoids false positives from stale upgrade_state by requiring a target
+                if upgrade_state and upgrade_state > 0 and target_version and target_version != current_version:
                     return True
                 
                 return False
