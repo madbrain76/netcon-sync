@@ -27,6 +27,7 @@ if os.path.exists(_VENV_PATH):
 
 import argparse
 import json
+import time
 from datetime import datetime, timedelta
 from collections import defaultdict
 import nss.error
@@ -2984,6 +2985,7 @@ EXAMPLES:
                     # Track if any AP in this layer is actually being upgraded
                     layer_has_upgrade = False
                     
+                    # Issue upgrade commands to all APs in this layer (concurrent upgrades)
                     for ap in layer_aps:
                         ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                         ap_mac = ap.get("mac")
@@ -3004,11 +3006,31 @@ EXAMPLES:
                                         initiation_time_str = datetime.now().strftime("%H:%M:%S")
                                         print(f"[INITIATING] {current} -> {new} at {initiation_time_str}")
                                         
-                                        # Verify upgrade state change
+                                        # Verify upgrade state change - with retry if initial attempt fails
                                         verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
+                                        upgrade_success = False
+                                        
                                         if verify_result['success']:
-                                            print(f"  [OK] State change confirmed: {initial_state} -> {verify_result['final_state']}\n")
-                                            # Track this AP for monitoring
+                                            print(f"  [OK] Upgrade detected: {verify_result['message']}\n")
+                                            upgrade_success = True
+                                        else:
+                                            # Initial attempt failed, retry the upgrade command once
+                                            print(f"  [WAIT] No active upgrade in 120s, retrying upgrade command...")
+                                            retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
+                                            if retry_result['success']:
+                                                # Check for upgrade activity again after retry
+                                                retry_initial_state = unifi_utils.get_ap_state(ap_mac)
+                                                retry_verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, retry_initial_state)
+                                                if retry_verify_result['success']:
+                                                    print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n")
+                                                    upgrade_success = True
+                                                else:
+                                                    print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n")
+                                            else:
+                                                print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n")
+                                        
+                                        # Only track if upgrade was successful
+                                        if upgrade_success:
                                             aps_upgrading[ap_mac] = {
                                                 "name": ap_name,
                                                 "target_version": new,
@@ -3016,8 +3038,6 @@ EXAMPLES:
                                             }
                                             ap_initiation_times[ap_mac] = initiation_time
                                             layer_has_upgrade = True
-                                        else:
-                                            print(f"  [FAIL] {verify_result['message']}\n")
                                         
                                         # Add configurable delay after each upgrade initiation attempt (only if successful)
                                         if verify_result['success']:
@@ -3085,11 +3105,17 @@ EXAMPLES:
                                     
                                     completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                                     print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
+                                
+                                # Check if upgrade is actively progressing (upgrade_state > 0)
+                                elif unifi_utils.is_ap_actively_upgrading(ap_mac):
+                                    # Update progress time - active upgrade is progressing
+                                    last_progress_time = time.time()
+                                    no_progress_displayed = False
                         
-                        # Check for no progress in 60 seconds and show AP states
+                        # Check for no progress in 60 seconds and retry stuck upgrades
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
                             no_progress_displayed = True
-                            print(f"\n[WAIT] No progress in the last minute. Showing status of APs still upgrading:\n")
+                            print(f"\n[RETRY] No progress in last 60 seconds. Retrying stalled upgrades:\n")
                             
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
@@ -3098,7 +3124,24 @@ EXAMPLES:
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
                                     current_version = unifi_utils.get_ap_current_version(ap_mac)
                                     target_version = ap_info['target_version']
-                                    print(f"  {ap_info['name']}: {current_version} -> {target_version} (state: {state_desc} [{ap_state}])")
+                                    
+                                    # If version hasn't changed, retry the upgrade
+                                    if current_version == ap_info['current_version']:
+                                        print(f"  {ap_info['name']}: {current_version} (stuck at {state_desc}) - retrying upgrade...")
+                                        retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
+                                        if retry_result['success']:
+                                            print(f"    [OK] Upgrade reissued")
+                                            # Reset progress tracking for this retry
+                                            last_progress_time = time.time()
+                                            no_progress_displayed = False
+                                        else:
+                                            print(f"    [FAIL] {retry_result.get('message', 'Unknown error')}")
+                                    else:
+                                        print(f"  {ap_info['name']}: Progress detected ({ap_info['current_version']} -> {current_version})")
+                                        # Update tracking with new version
+                                        ap_info['current_version'] = current_version
+                                        last_progress_time = time.time()
+                                        no_progress_displayed = False
                             
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
@@ -3136,11 +3179,49 @@ EXAMPLES:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     ap_mac = ap.get("mac")
                     if ap_mac:
+                        # Check if already in upgrade queue (from earlier in this run)
+                        if ap_mac in aps_upgrading:
+                            print(f"  {ap_name}... [OK] Already queued for upgrade\n")
+                            continue
+                        
+                        # First, check if upgrade is already in progress
+                        print(f"  {ap_name}... ", end="", flush=True)
+                        ap_already_upgrading = False
+                        try:
+                            devices = unifi_utils.get_devices()
+                            for device in devices:
+                                if device.get("mac", "").lower() == ap_mac.lower():
+                                    upgrade_state = device.get("upgrade_state")
+                                    upgrade_triggered_by = device.get("upgrade_triggered_by")
+                                    state = device.get("state")
+                                    
+                                    # Check if upgrade is already active
+                                    # upgrade_state > 0 means upgrade is in progress
+                                    # upgrade_triggered_by being set also indicates active upgrade
+                                    if (upgrade_state and upgrade_state > 0) or upgrade_triggered_by:
+                                        print(f"[OK] Upgrade already in progress (detected from controller)\n")
+                                        ap_already_upgrading = True
+                                        # Track this AP for monitoring
+                                        current = device.get("version", "Unknown")
+                                        upgrade_to = device.get("upgrade_to_firmware", "Unknown")
+                                        aps_upgrading[ap_mac] = {
+                                            "name": ap_name,
+                                            "target_version": upgrade_to,
+                                            "current_version": current
+                                        }
+                                        ap_initiation_times[ap_mac] = time.time()
+                                    break
+                        except Exception as e:
+                            pass
+                        
+                        if ap_already_upgrading:
+                            continue
+                        
+                        # If not already upgrading, proceed with upgrade command
                         result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=dry_run)
                         if result['success']:
                             current = result.get('current_version', 'Unknown')
                             new = result.get('new_version', 'Unknown')
-                            print(f"  {ap_name}... ", end="")
                             if result.get('new_version') and result['current_version'] != result['new_version']:
                                 if dry_run:
                                     print(f"[UPGRADABLE] {current} -> {new}")
@@ -3152,26 +3233,44 @@ EXAMPLES:
                                     initiation_time_str = datetime.now().strftime("%H:%M:%S")
                                     print(f"[INITIATING] {current} -> {new} at {initiation_time_str}")
                                     
-                                    # Verify upgrade state change
+                                    # Verify upgrade state change - with one retry if initial attempt fails
                                     verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
+                                    upgrade_success = False
+                                    
                                     if verify_result['success']:
-                                        print(f"  [OK] State change confirmed: {initial_state} -> {verify_result['final_state']}\n")
-                                        # Track this AP for monitoring
+                                        print(f"  [OK] Upgrade detected: {verify_result['message']}\n")
+                                        upgrade_success = True
+                                    else:
+                                        # Initial attempt failed, retry the upgrade command once
+                                        print(f"  [WAIT] No upgrade activity in 60s, retrying upgrade command...")
+                                        retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
+                                        if retry_result['success']:
+                                            # Check for upgrade activity again after retry
+                                            retry_initial_state = unifi_utils.get_ap_state(ap_mac)
+                                            retry_verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, retry_initial_state)
+                                            if retry_verify_result['success']:
+                                                print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n")
+                                                upgrade_success = True
+                                            else:
+                                                print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n")
+                                        else:
+                                            print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n")
+                                    
+                                    # Only track if upgrade was successful
+                                    if upgrade_success:
                                         aps_upgrading[ap_mac] = {
                                             "name": ap_name,
                                             "target_version": new,
                                             "current_version": current
                                         }
                                         ap_initiation_times[ap_mac] = initiation_time
-                                    else:
-                                        print(f"  [FAIL] {verify_result['message']}\n")
                             else:
                                 print(f"(already latest)")
                         else:
                             print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
                         
-                        # Add configurable delay after each upgrade initiation in actual mode
-                        if not dry_run:
+                        # Add configurable delay after each upgrade initiation in actual mode (only if upgrade was attempted and successful)
+                        if not dry_run and result.get('success') and result.get('new_version') and result['current_version'] != result['new_version']:
                             time.sleep(args.ap_upgrade_delay)
                 
                 # Monitor upgrade progress (only in actual mode and if we have APs to monitor)
@@ -3227,10 +3326,10 @@ EXAMPLES:
                                     completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                                     print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
                         
-                        # Check for no progress in 60 seconds and show AP states
+                        # Check for no progress in 60 seconds and retry stuck upgrades
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
                             no_progress_displayed = True
-                            print(f"\n[WAIT] No progress in the last minute. Showing status of APs still upgrading:\n")
+                            print(f"\n[RETRY] No progress in last 60 seconds. Retrying stalled upgrades:\n")
                             
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
@@ -3239,7 +3338,24 @@ EXAMPLES:
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
                                     current_version = unifi_utils.get_ap_current_version(ap_mac)
                                     target_version = ap_info['target_version']
-                                    print(f"  {ap_info['name']}: {current_version} -> {target_version} (state: {state_desc} [{ap_state}])")
+                                    
+                                    # If version hasn't changed, retry the upgrade
+                                    if current_version == ap_info['current_version']:
+                                        print(f"  {ap_info['name']}: {current_version} (stuck at {state_desc}) - retrying upgrade...")
+                                        retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
+                                        if retry_result['success']:
+                                            print(f"    [OK] Upgrade reissued")
+                                            # Reset progress tracking for this retry
+                                            last_progress_time = time.time()
+                                            no_progress_displayed = False
+                                        else:
+                                            print(f"    [FAIL] {retry_result.get('message', 'Unknown error')}")
+                                    else:
+                                        print(f"  {ap_info['name']}: Progress detected ({ap_info['current_version']} -> {current_version})")
+                                        # Update tracking with new version
+                                        ap_info['current_version'] = current_version
+                                        last_progress_time = time.time()
+                                        no_progress_displayed = False
                             
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)

@@ -1449,7 +1449,8 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
 def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
     """
     Verifies that a firmware upgrade has been successfully initiated on an AP.
-    Checks that the AP's state changes from its initial state.
+    Uses version change as the ground truth - if upgrade is really happening, version progresses.
+    Checks every 5 seconds for up to 120 seconds (2 minutes).
     
     Args:
         ap_mac (str): The MAC address of the AP
@@ -1457,42 +1458,77 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
         
     Returns:
         dict: {
-            "success": bool - Whether state change was detected,
+            "success": bool - Whether upgrade activity was detected,
             "message": str - Status message,
-            "final_state": str - AP state after state change confirmed (if success)
+            "final_state": str - AP state after upgrade confirmed (if success)
         }
     """
     import time
     
-    # Retry loop: check up to 6 times over 1 minute (with 10-second checks)
-    max_retries = 6
-    check_interval = 10  # seconds
-    state_changed = False
+    # Get initial version before checking for changes
+    initial_version = get_ap_current_version(ap_mac)
+    
+    # Check every 5 seconds for up to 120 seconds (24 checks = 2 minutes)
+    check_interval = 5  # seconds
+    max_checks = 24
+    upgrade_detected = False
     final_state = initial_state
     
-    for retry_num in range(max_retries):
-        # Wait a bit for state to change
+    for check_num in range(max_checks):
+        # Wait a bit for upgrade to start
         time.sleep(check_interval)
         
-        # Check if state changed
-        current_state = get_ap_state(ap_mac)
-        
-        if current_state != initial_state:
-            state_changed = True
-            final_state = current_state
-            break
+        # Get current AP data
+        try:
+            devices = get_devices()
+            for device in devices:
+                if device.get("mac", "").lower() == ap_mac.lower():
+                    current_state = device.get("state", initial_state)
+                    current_version = device.get("version")
+                    
+                    # Check if version changed (most reliable indicator of upgrade activity)
+                    if current_version and current_version != initial_version:
+                        upgrade_detected = True
+                        final_state = current_state
+                        break
+                    
+                    # Also check API upgrade fields as backup indicators
+                    upgrade_state = device.get("upgrade_state")
+                    upgrade_progress = device.get("upgrade_progress")
+                    upgrade_triggered_by = device.get("upgrade_triggered_by")
+                    
+                    if upgrade_state and upgrade_state > 0:
+                        upgrade_detected = True
+                        final_state = current_state
+                        break
+                    
+                    if upgrade_progress and upgrade_progress > 0:
+                        upgrade_detected = True
+                        final_state = current_state
+                        break
+                    
+                    if upgrade_triggered_by:
+                        upgrade_detected = True
+                        final_state = current_state
+                        break
+            
+            # Break outer loop if upgrade detected
+            if upgrade_detected:
+                break
+        except Exception:
+            pass
     
-    if state_changed:
+    if upgrade_detected:
         return {
             "success": True,
-            "message": f"State changed from {initial_state} to {final_state}",
+            "message": f"Upgrade active",
             "final_state": final_state
         }
     else:
         return {
             "success": False,
-            "message": f"AP state did not change after {max_retries * check_interval} seconds (remained {initial_state})",
-            "final_state": current_state
+            "message": f"No upgrade activity detected after 120 seconds",
+            "final_state": initial_state
         }
 
 
@@ -1514,3 +1550,36 @@ def get_ap_current_version(ap_mac: str) -> str:
         return None
     except Exception:
         return None
+
+
+def is_ap_actively_upgrading(ap_mac: str) -> bool:
+    """
+    Check if an AP is actively upgrading firmware.
+    
+    Uses upgrade_state and upgrade_triggered_by fields to detect active upgrades.
+    upgrade_state > 0 means firmware upgrade is in progress.
+    upgrade_triggered_by field indicates an upgrade has been triggered.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP
+    
+    Returns:
+        bool: True if AP is actively upgrading, False otherwise
+    """
+    try:
+        devices = get_devices()
+        for device in devices:
+            if device.get("mac", "").lower() == ap_mac.lower():
+                # Check if upgrade is active (upgrade_state > 0)
+                upgrade_state = device.get("upgrade_state")
+                if upgrade_state and upgrade_state > 0:
+                    return True
+                
+                # Check if upgrade was triggered (upgrade_triggered_by field set)
+                if device.get("upgrade_triggered_by"):
+                    return True
+                
+                return False
+        return False
+    except Exception:
+        return False
