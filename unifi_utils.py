@@ -1138,15 +1138,21 @@ def _get_ap_state_description(state):
 def get_ap_state(ap_mac: str) -> str:
     """
     Get the current state of an AP by MAC address.
-    Uses intelligent inference from multiple fields (uptime, last_seen, adopted status)
-    rather than relying solely on the unreliable 'state' field.
+    Uses intelligent inference from multiple fields (adoption, upgrade status, uptime).
+    
+    The controller sets upgrade_triggered_by to the username when a user initiates an upgrade.
+    This reliably distinguishes UPGRADING from UPGRADABLE states.
     
     Args:
         ap_mac (str): The MAC address of the AP
         
     Returns:
-        str: AP state description ("RUNNING", "DISCONNECTED", "INITIALIZING", etc.)
-             Returns "UNKNOWN" if AP not found
+        str: AP state description:
+             - "UPGRADING": upgrade_triggered_by is set (user initiated upgrade)
+             - "UPGRADABLE": upgradable=true but not triggered
+             - "RUNNING": adopted and has uptime
+             - "DISCONNECTED": not adopted
+             - "UNKNOWN": AP not found
     """
     try:
         devices = get_devices()
@@ -1156,25 +1162,44 @@ def get_ap_state(ap_mac: str) -> str:
             if device.get("type") == "uap":
                 device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
                 if device_mac == target_mac_lower:
-                    # Intelligent state determination:
-                    # 1. Check if AP is adopted (adopted=true means it's connected to controller)
+                    # Check if AP is adopted (adopted=true means it's connected to controller)
                     is_adopted = device.get("adopted", False)
                     if not is_adopted:
                         return "DISCONNECTED"
                     
-                    # 2. Check uptime - if uptime > 0, AP is running
+                    # Check version-based state (ignore upgrade_triggered_by, it's unreliable)
+                    current_version = device.get("version")
+                    target_version = device.get("upgrade_to_firmware")
+                    upgrade_progress = device.get("upgrade_progress")
+                    upgrade_state = device.get("upgrade_state")
+                    upgradable = device.get("upgradable", False)
+                    
+                    # 1. If versions differ, check if actively upgrading or just available
+                    if current_version and target_version and current_version != target_version:
+                        # Check for active upgrade activity
+                        if (upgrade_progress and upgrade_progress > 0) or (upgrade_state and upgrade_state > 0):
+                            return "UPGRADING"
+                        # Otherwise just available
+                        if upgradable:
+                            return "UPGRADABLE"
+                    
+                    # 2. Versions match, check if upgradable (shouldn't happen, but just in case)
+                    if upgradable:
+                        return "UPGRADABLE"
+                    
+                    # 3. Check uptime - if uptime > 0, AP is running normally
                     uptime_seconds = device.get("uptime", 0)
                     if uptime_seconds and uptime_seconds > 0:
                         return "RUNNING"
                     
-                    # 3. Check if recently seen (within last 30 seconds)
+                    # 4. Check if recently seen (within last 30 seconds)
                     import time
                     current_time = time.time()
                     last_seen = device.get("last_seen", 0)
                     if last_seen and (current_time - last_seen) < 30:
                         return "RUNNING"
                     
-                    # 4. If adopted but no uptime/recent activity, might be initializing
+                    # 5. If adopted but no uptime/recent activity, might be initializing
                     if is_adopted:
                         return "CONNECTING/INITIALIZING"
                     
@@ -1247,25 +1272,20 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
             continue
         
         # Check if already upgrading
-        # Mark as upgrading if:
-        # 1. upgrade_progress > 0 (actively downloading/installing) OR
-        # 2. upgrade_state > 0 with a target version different from current (queued/started but not downloading yet)
-        # This avoids false positives by requiring target version to be different from current
+        # Mark as upgrading if upgrade_progress > 0 (actively downloading/installing)
+        # We don't check upgrade_to_firmware here because it can be set from previous attempts
         upgrade_progress = device.get("upgrade_progress", 0)
-        upgrade_state = device.get("upgrade_state", 0)
         current_version = device.get("version", "")
         upgrade_to_version = device.get("upgrade_to_firmware", "")
         
-        is_already_upgrading = (
-            (upgrade_progress and upgrade_progress > 0) or
-            (upgrade_state and upgrade_state > 0 and upgrade_to_version and upgrade_to_version != current_version)
-        )
+        is_already_upgrading = upgrade_progress and upgrade_progress > 0
         
         if is_already_upgrading:
             # Store the upgrade details in the AP dict for later display
             ap_status[ap_mac] = {'ap': ap, 'category': 'already_upgrading'}
             
-            print(f"  [SKIP] {ap_name}: Already upgrading")
+            ap_state = get_ap_state(ap_mac)
+            print(f"  [SKIP] {ap_name}: Already upgrading (state={ap_state}, progress={upgrade_progress}%)")
             # Mark as already upgrading - DO NOT re-initiate upgrades on these
             continue
         
@@ -1314,18 +1334,12 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
                 elapsed = int(time.time() - start_time)
                 
                 # Check if it started upgrading while waiting
-                # Mark as upgrading if:
-                # 1. upgrade_progress > 0 OR
-                # 2. upgrade_state > 0 with a target version different from current
+                # Mark as upgrading if upgrade_progress > 0 (actively downloading/installing)
                 upgrade_progress = device.get("upgrade_progress", 0)
-                upgrade_state = device.get("upgrade_state", 0)
                 current_version = device.get("version", "")
                 upgrade_to_version = device.get("upgrade_to_firmware", "")
                 
-                is_upgrading = (
-                    (upgrade_progress and upgrade_progress > 0) or
-                    (upgrade_state and upgrade_state > 0 and upgrade_to_version and upgrade_to_version != current_version)
-                )
+                is_upgrading = upgrade_progress and upgrade_progress > 0
                 
                 if is_upgrading:
                     print(f"  [SKIP] {ap_name}: Started upgrading while waiting ({elapsed}s)")
@@ -1480,7 +1494,7 @@ def check_ap_upgrade_status(ap_mac: str) -> dict:
         }
 
 
-def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
+def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: bool = False) -> dict:
     """
     Upgrades the firmware on an access point to the latest version available
     for its configured firmware channel in the controller.
@@ -1489,6 +1503,9 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
         ap_mac (str): The MAC address of the AP to upgrade (e.g., "aa:bb:cc:dd:ee:ff").
         dry_run (bool): If True, show what would be upgraded without actually upgrading.
                        Defaults to False.
+        skip_health_check (bool): If True, skip checking if AP is in a healthy state.
+                                 Used for retries when an upgrade was dropped by the controller.
+                                 Defaults to False.
     
     Returns:
         dict: A dictionary containing:
@@ -1534,13 +1551,24 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
             current_version = "Unknown"
         
         ap_name = matching_ap.get("name") or matching_ap.get("model", "Unnamed AP")
+        upgrade_to_firmware = matching_ap.get("upgrade_to_firmware")
+        
+        # Check if an upgrade is already actively in progress (version mismatch + active progress)
+        # We check is_ap_actively_upgrading() instead of just upgrade_triggered_by because
+        # the latter is unreliable (persists across channel switches and other operations)
+        if is_ap_actively_upgrading(ap_mac):
+            # AP already has an external upgrade in progress - don't re-initiate
+            # But return success so it can be monitored by the upgrade loop
+            return {
+                "success": True,
+                "current_version": current_version,
+                "new_version": upgrade_to_firmware,  # Return the target version for monitoring
+                "message": f"{ap_name} already upgrading externally - monitoring only",
+                "skip_initiation": True  # Flag to indicate we didn't send an upgrade command
+            }
         
         # Get the firmware channel (default to "release" if not set)
         firmware_channel = matching_ap.get("fw_channel") or matching_ap.get("update_channel", "release")
-        
-        # First, check if the device itself has the upgrade-to firmware version
-        # This field is populated by the UniFi controller when an upgrade is available
-        upgrade_to_firmware = matching_ap.get("upgrade_to_firmware")
         
         # Fetch available firmware information from the controller
         try:
@@ -1665,11 +1693,141 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False) -> dict:
         }
 
 
+def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval: int = 15) -> dict:
+    """
+    Continuously attempt to trigger an upgrade on an AP, retrying every retry_interval seconds
+    if the AP remains in UPGRADABLE state (indicating the previous request was ignored).
+    
+    This handles race conditions where the controller receives the upgrade request but
+    doesn't process it due to timing issues or other transient problems.
+    
+    Args:
+        ap_mac (str): The MAC address of the AP
+        max_retries (int): Maximum number of upgrade attempts (default: 8 = ~2 minutes with 15s interval)
+        retry_interval (int): Seconds to wait between retries (default: 15)
+    
+    Returns:
+        dict: {
+            "success": bool - True if upgrade was activated or already complete,
+            "state": str - Final state of the AP (UPGRADING, RUNNING, UPGRADABLE, etc.),
+            "attempts": int - Number of upgrade requests sent,
+            "message": str - Status message
+        }
+    """
+    import time
+    
+    attempt = 0
+    start_time = time.time()
+    
+    while attempt < max_retries:
+        attempt += 1
+        
+        # Send upgrade request
+        result = upgrade_ap_firmware(ap_mac, dry_run=False)
+        
+        if not result['success']:
+            # upgrade_ap_firmware failed to send the request
+            return {
+                "success": False,
+                "state": "UNKNOWN",
+                "attempts": attempt,
+                "message": f"Failed to send upgrade request: {result.get('message', 'Unknown error')}"
+            }
+        
+        # Wait for the retry_interval seconds to see if AP transitions to UPGRADING
+        print(f"  [ATT {attempt}] Waiting {retry_interval}s to detect upgrade activity...", end="", flush=True)
+        time.sleep(retry_interval)
+        
+        # Check current state
+        current_state = get_ap_state(ap_mac)
+        
+        if current_state == "UPGRADING":
+            # Success! AP is now actively upgrading
+            elapsed = int(time.time() - start_time)
+            print(f" ACTIVE (took {attempt} attempt{'s' if attempt > 1 else ''}, {elapsed}s total)")
+            return {
+                "success": True,
+                "state": "UPGRADING",
+                "attempts": attempt,
+                "message": f"Upgrade activated on attempt {attempt}"
+            }
+        elif current_state == "RUNNING":
+            # Check if upgrade completed successfully or failed
+            device_mac = ap_mac.lower()
+            devices = get_devices()
+            for device in devices:
+                if device.get("mac", "").lower() == device_mac:
+                    current_version = device.get("version")
+                    target_version = device.get("upgrade_to_firmware")
+                    
+                    # Success: both version fields must be set and match
+                    if current_version and target_version and current_version == target_version:
+                        # Versions match - upgrade completed successfully
+                        elapsed = int(time.time() - start_time)
+                        print(f" COMPLETE (took {elapsed}s)")
+                        return {
+                            "success": True,
+                            "state": "RUNNING",
+                            "attempts": attempt,
+                            "message": f"Upgrade completed successfully to {current_version}"
+                        }
+                    # Failure: target_version is set AND current_version is set AND they don't match
+                    elif current_version and target_version and current_version != target_version:
+                        # target_version is set but version hasn't changed = upgrade FAILED
+                        elapsed = int(time.time() - start_time)
+                        print(f" FAILED")
+                        return {
+                            "success": False,
+                            "state": "RUNNING",
+                            "attempts": attempt,
+                            "message": f"Upgrade failed: AP in RUNNING state but version unchanged ({current_version} still set, target was {target_version})"
+                        }
+                    # else: incomplete data, maybe still being processed - continue retrying
+                    break
+            # Still running without complete info, continue retrying
+            print(f" waiting...")
+        elif current_state == "UPGRADABLE":
+            # AP is still UPGRADABLE - the upgrade request was ignored, retry
+            print(f" still UPGRADABLE, retrying...")
+            if attempt >= max_retries:
+                elapsed = int(time.time() - start_time)
+                return {
+                    "success": False,
+                    "state": "UPGRADABLE",
+                    "attempts": attempt,
+                    "message": f"AP remained UPGRADABLE after {attempt} retry attempts ({elapsed}s). Upgrade request may be blocked by controller."
+                }
+            # Continue to next retry
+        else:
+            # Some other state
+            elapsed = int(time.time() - start_time)
+            print(f" {current_state}")
+            return {
+                "success": False,
+                "state": current_state,
+                "attempts": attempt,
+                "message": f"AP in unexpected state: {current_state} after attempt {attempt}"
+            }
+    
+    # Max retries exceeded
+    elapsed = int(time.time() - start_time)
+    return {
+        "success": False,
+        "state": get_ap_state(ap_mac),
+        "attempts": attempt,
+        "message": f"Max retries ({max_retries}) exceeded in {elapsed}s. AP may have network issues or controller may be rejecting upgrades."
+    }
+
+
 def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
     """
-    Verifies that a firmware upgrade has been successfully initiated on an AP.
-    Uses version change as the ground truth - if upgrade is really happening, version progresses.
-    Checks every 5 seconds for up to 30 seconds.
+    Checks if the upgrade initiation request was accepted by the controller.
+    
+    NOTE: Due to controller limitations, this cannot definitively prove an upgrade is actually
+    progressing - it can only verify that upgrade_triggered_by was set by the controller,
+    indicating the request was accepted.
+    
+    Real upgrade progress is detected in the monitoring loop via version changes or completion status.
     
     Args:
         ap_mac (str): The MAC address of the AP
@@ -1677,73 +1835,54 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
         
     Returns:
         dict: {
-            "success": bool - Whether upgrade activity was detected,
+            "success": bool - Whether initiation request was accepted,
             "message": str - Status message,
-            "final_state": str - AP state after upgrade confirmed (if success)
+            "final_state": str - AP state after checking
         }
     """
     import time
     
-    # Get initial version before checking for changes
+    # Get initial version for reference
     initial_version = get_ap_current_version(ap_mac)
     
-    # Check every 5 seconds for 30 seconds (6 checks)
-    check_interval = 5  # seconds
-    max_checks = 6
-    upgrade_detected = False
-    final_state = initial_state
+    # Wait a moment for controller to register the upgrade request
+    time.sleep(2)
     
-    for check_num in range(max_checks):
-        # Wait a bit for upgrade to start
-        time.sleep(check_interval)
-        
-        # Get current AP data
-        try:
-            devices = get_devices()
-            for device in devices:
-                if device.get("mac", "").lower() == ap_mac.lower():
-                    current_state = device.get("state", initial_state)
-                    current_version = device.get("version")
-                    upgrade_progress = device.get("upgrade_progress")
-                    upgrade_state = device.get("upgrade_state")
-                    target_version = device.get("upgrade_to_firmware", "")
-                    
-                    # Check for upgrade activity (in order of reliability):
-                    # 1. Version changed (most reliable - upgrade is progressing/completed)
-                    if current_version and current_version != initial_version:
-                        upgrade_detected = True
-                        final_state = current_state
-                        break
-                    
-                    # 2. upgrade_progress > 0 (actively downloading/installing)
-                    if upgrade_progress and upgrade_progress > 0:
-                        upgrade_detected = True
-                        final_state = current_state
-                        break
-                    
-                    # 3. upgrade_state > 0 with target version different from current
-                    # This indicates upgrade is queued/scheduled but not yet downloading
-                    if upgrade_state and upgrade_state > 0 and target_version and target_version != current_version:
-                        upgrade_detected = True
-                        final_state = current_state
-                        break
-            
-            # Break outer loop if upgrade detected
-            if upgrade_detected:
-                break
-        except Exception:
-            pass
+    # Check AP state - if it shows UPGRADING, the initiation was accepted
+    current_ap_state = get_ap_state(ap_mac)
     
-    if upgrade_detected:
+    # If version already changed, upgrade completed immediately (unlikely but possible)
+    current_version = get_ap_current_version(ap_mac)
+    if current_version and current_version != initial_version:
         return {
             "success": True,
-            "message": f"Upgrade active",
-            "final_state": final_state
+            "message": "Upgrade completed immediately (version changed)",
+            "final_state": current_ap_state
         }
-    else:
+    
+    # Check if upgrade_triggered_by is set (means controller accepted the request)
+    try:
+        devices = get_devices()
+        for device in devices:
+            if device.get("mac", "").lower() == ap_mac.lower():
+                upgrade_triggered_by = device.get("upgrade_triggered_by")
+                if upgrade_triggered_by:
+                    return {
+                        "success": True,
+                        "message": f"Upgrade request accepted by controller (triggered_by={upgrade_triggered_by})",
+                        "final_state": current_ap_state
+                    }
+                else:
+                    # No upgrade_triggered_by set - request was rejected or not processed
+                    return {
+                        "success": False,
+                        "message": "Upgrade request not accepted by controller (upgrade_triggered_by not set)",
+                        "final_state": current_ap_state
+                    }
+    except Exception as e:
         return {
             "success": False,
-            "message": f"No upgrade activity detected after 30 seconds",
+            "message": f"Error checking upgrade status: {e}",
             "final_state": initial_state
         }
 
@@ -1770,35 +1909,33 @@ def get_ap_current_version(ap_mac: str) -> str:
 
 def is_ap_actively_upgrading(ap_mac: str) -> bool:
     """
-    Check if an AP is actively upgrading firmware.
+    Check if an AP has an upgrade actively in progress.
     
-    Uses both upgrade_progress and upgrade_state with validation to detect active upgrades.
-    - upgrade_progress > 0 means firmware is downloading/installing
-    - upgrade_state > 0 with a target version different from current also indicates active upgrade
+    Uses version mismatch + upgrade progress to detect active upgrades.
+    Ignores upgrade_triggered_by field as it's unreliable (persists across
+    channel switches and other operations).
     
     Args:
         ap_mac (str): The MAC address of the AP
     
     Returns:
-        bool: True if AP is actively upgrading, False otherwise
+        bool: True if upgrade is actively in progress (version mismatch + active progress)
     """
     try:
         devices = get_devices()
         for device in devices:
             if device.get("mac", "").lower() == ap_mac.lower():
-                upgrade_progress = device.get("upgrade_progress")
-                upgrade_state = device.get("upgrade_state")
-                current_version = device.get("version", "")
-                target_version = device.get("upgrade_to_firmware", "")
+                # Check if versions differ
+                current_version = device.get("version")
+                target_version = device.get("upgrade_to_firmware")
                 
-                # upgrade_progress > 0 = actively downloading/installing
-                if upgrade_progress and upgrade_progress > 0:
-                    return True
-                
-                # upgrade_state > 0 with a different target version = upgrade in progress
-                # This avoids false positives from stale upgrade_state by requiring a target
-                if upgrade_state and upgrade_state > 0 and target_version and target_version != current_version:
-                    return True
+                if current_version and target_version and current_version != target_version:
+                    # Versions differ - check if actively upgrading
+                    upgrade_progress = device.get("upgrade_progress")
+                    upgrade_state = device.get("upgrade_state")
+                    
+                    if (upgrade_progress and upgrade_progress > 0) or (upgrade_state and upgrade_state > 0):
+                        return True  # Actively upgrading
                 
                 return False
         return False
