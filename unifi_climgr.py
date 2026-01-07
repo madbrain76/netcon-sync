@@ -41,7 +41,7 @@ _config_error = None
 try:
     import unifi_utils
     from config import UNIFI_NETWORK_URL, UNIFI_SITE_ID, DEFAULT_DOMAIN
-    from trust import handle_trust_server_url, handle_trust_ca_cert, format_nss_error
+    from trust import handle_trust_server_url, handle_trust_ca_cert, format_nss_error, ensure_nss_db
     from urllib.parse import urlparse
 except ModuleNotFoundError as e:
     print(f"ERROR: Missing required dependency: {e}")
@@ -1908,21 +1908,13 @@ if __name__ == "__main__":
     import subprocess
     
     nss_db_dir = Path.home() / ".netcon-sync"
-    nss_db_dir.mkdir(parents=True, exist_ok=True)
     
     # Create NSS database if it doesn't exist
-    cert_db = nss_db_dir / "cert9.db"
-    if not cert_db.exists():
-        try:
-            subprocess.run(
-                ["certutil", "-N", "-d", str(nss_db_dir), "-f", "/dev/null"],
-                check=True,
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"Error creating NSS database: {e.stderr.decode() if e.stderr else e}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        ensure_nss_db(nss_db_dir)
+    except RuntimeError as e:
+        print(f"Error initializing NSS database: {e}", file=sys.stderr)
+        sys.exit(1)
     
     # Initialize NSS
     try:

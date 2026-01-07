@@ -53,7 +53,7 @@ import nss.nss as nss_core
 # Import project utilities
 try:
     from http_tls_nss import NSPRNSSURLOpener
-    from trust import _ensure_nss_db, format_nss_error, handle_trust_ca_cert, handle_trust_server_url
+    from trust import ensure_nss_db, format_nss_error, handle_trust_ca_cert, handle_trust_server_url
 except ModuleNotFoundError as e:
     print(f"ERROR: Missing required dependency: {e}")
     print("\nPlease run the setup script:")
@@ -663,7 +663,7 @@ Examples:
     
     # Initialize NSS database
     nss_db_dir = Path.home() / ".netcon-sync"
-    _ensure_nss_db(nss_db_dir)
+    ensure_nss_db(nss_db_dir)
     
     try:
         nss_core.nss_init(str(nss_db_dir))

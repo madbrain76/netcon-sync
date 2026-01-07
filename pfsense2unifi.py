@@ -77,7 +77,7 @@ PFSENSE_DHCP_INTERFACE = None
 try:
     from pfsense_utils import get_pfsense_dhcp_static_mappings, validate_mac_address
     from unifi_utils import login, add_client, get_all_unifi_clients, forget_client, forget_clients_batch
-    from trust import handle_trust_ca_cert, handle_trust_server_url, format_nss_error
+    from trust import handle_trust_ca_cert, handle_trust_server_url, format_nss_error, ensure_nss_db
     from urllib.parse import urlparse
 except ModuleNotFoundError as e:
     print(f"ERROR: Missing required dependency: {e}")
@@ -100,7 +100,7 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
     Returns:
         dict: Results of orphan detection/deletion
     """
-    from unifi_utils import _get_unifi_clients_fast
+    from unifi_utils import get_unifi_clients_fast
     
     orphan_results = {
         "found": [],
@@ -109,7 +109,7 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
     }
     
     print("\nChecking for orphaned clients in UniFi...")
-    unifi_clients_by_mac = _get_unifi_clients_fast()
+    unifi_clients_by_mac = get_unifi_clients_fast()
     
     # Normalize synced MACs to lowercase for comparison
     synced_macs_lower = {mac.lower() for mac in synced_macs}
@@ -174,7 +174,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
     print("   Use UniFi's built-in backup feature in System Settings > Backup & Restore")
     print()
     
-    from unifi_utils import _make_unifi_api_call, _build_client_payload, _get_unifi_clients_fast
+    from unifi_utils import make_unifi_api_call, build_client_payload, get_unifi_clients_fast
     import time
     
     # Use provided suffix or default to " - Wifi"
@@ -217,7 +217,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
 
         # STEP 3: Pre-fetch all UniFi clients ONCE (the only time we fetch the full list)
         print("\nPre-fetching all UniFi clients...")
-        unifi_clients_by_mac = _get_unifi_clients_fast()
+        unifi_clients_by_mac = get_unifi_clients_fast()
         print(f"Found {len(unifi_clients_by_mac)} existing clients in UniFi.")
 
         # STEP 4: Process pfSense mappings and send API calls directly
@@ -240,9 +240,12 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                 })
                 continue
 
+            # Strip trailing/leading whitespace from description for matching
+            descr_stripped = descr.strip() if descr else ""
+            
             # Apply filtering (skip if no_suffix_filter is True)
             if not no_suffix_filter:
-                if not descr or not descr.endswith(client_suffix):
+                if not descr_stripped or not descr_stripped.endswith(client_suffix):
                     results["filtered_out"].append({
                         "mac": mac,
                         "description": descr or "(no description)",
@@ -253,11 +256,11 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
             # Build client name and note
             if no_suffix_filter:
                 # No suffix filtering: use description as-is, or hostname if no description
-                unifi_client_name = descr if descr else (hostname if hostname else f"AP (MAC: {mac})")
+                unifi_client_name = descr_stripped if descr_stripped else (hostname if hostname else f"AP (MAC: {mac})")
                 unifi_note = hostname if hostname else ""
             else:
                 # With suffix filtering: strip the suffix from description
-                unifi_client_name = descr[:-len(client_suffix)].strip()
+                unifi_client_name = descr_stripped[:-len(client_suffix)].strip()
                 if not unifi_client_name:
                     unifi_client_name = hostname if hostname else f"AP (MAC: {mac})"
                 unifi_note = hostname if hostname else ""
@@ -291,7 +294,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                     if fields_changed:
                         # Only send API call if something actually changed
                         prep_start = time.time()
-                        payload = _build_client_payload(existing_client)
+                        payload = build_client_payload(existing_client)
                         payload["name"] = unifi_client_name
                         payload["display_name"] = unifi_client_name
                         payload["note"] = new_note  # Always set note (even if empty)
@@ -299,7 +302,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                         
                         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
                         api_start = time.time()
-                        _make_unifi_api_call("PUT", endpoint, json=payload)
+                        make_unifi_api_call("PUT", endpoint, json=payload)
                         api_time = time.time() - api_start
                         
                         results["updated"].append({
@@ -331,7 +334,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                     
                     endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user"
                     api_start = time.time()
-                    _make_unifi_api_call("POST", endpoint, json=payload)
+                    make_unifi_api_call("POST", endpoint, json=payload)
                     api_time = time.time() - api_start
                     
                     results["created"].append({
@@ -350,9 +353,10 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                 results["failed"].append({
                     "mac": mac,
                     "name": unifi_client_name,
-                    "note": unifi_note
+                    "note": unifi_note,
+                    "error": str(e)
                 })
-                print(f"  [{i}/{len(pfsense_mappings)}] [FAIL] {mac}: {unifi_client_name}")
+                print(f"  [{i}/{len(pfsense_mappings)}] [FAIL] {mac}: {unifi_client_name} - {e}")
                 sys.stdout.flush()
                 sys.stdout.flush()  # Real-time display
 
@@ -360,7 +364,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         all_modified = results["created"] + results["updated"]
         if all_modified:
             print("\nVerifying clients in UniFi (batch check)...")
-            unifi_clients_final = _get_unifi_clients_fast()
+            unifi_clients_final = get_unifi_clients_fast()
             unifi_macs_final = set(unifi_clients_final.keys())
             verified_count = 0
             unverified = []
@@ -416,7 +420,8 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         if results["failed"]:
             print("\nFAILED CLIENTS:")
             for client in results["failed"]:
-                print(f"  - {client['mac']}: {client['name']}")
+                error_msg = client.get("error", "Unknown error")
+                print(f"  - {client['mac']}: {client['name']} - {error_msg}")
         
         if results["invalid_mac"]:
             print("\nINVALID MAC ADDRESSES:")
@@ -567,25 +572,15 @@ EXAMPLES:
     
     # Initialize NSS database at startup (before any HTTPS connections)
     import nss.nss as nss_core
-    from pathlib import Path
-    import subprocess
     
     nss_db_dir = Path.home() / ".netcon-sync"
-    nss_db_dir.mkdir(parents=True, exist_ok=True)
     
     # Create NSS database if it doesn't exist
-    cert_db = nss_db_dir / "cert9.db"
-    if not cert_db.exists():
-        try:
-            subprocess.run(
-                ["certutil", "-N", "-d", str(nss_db_dir), "-f", "/dev/null"],
-                check=True,
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"Error creating NSS database: {e.stderr.decode() if e.stderr else e}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        ensure_nss_db(nss_db_dir)
+    except RuntimeError as e:
+        print(f"Error initializing NSS database: {e}", file=sys.stderr)
+        sys.exit(1)
     
     # Initialize NSS
     try:

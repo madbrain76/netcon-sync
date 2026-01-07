@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from http_tls_nss import get_server_certificate
 import nss.error
 
-def _ensure_nss_db(nss_db_dir):
+def ensure_nss_db(nss_db_dir):
     """
     Ensure the NSS database directory and files exist.
     
@@ -82,7 +82,7 @@ def is_cert_trusted(nss_db_dir, hostname: str, port: int = 443) -> bool:
     Returns:
         bool: True if the certificate is trusted, False otherwise
     """
-    _ensure_nss_db(nss_db_dir)
+    ensure_nss_db(nss_db_dir)
     nss_db_dir = Path(nss_db_dir)
     
     try:
@@ -160,7 +160,7 @@ def import_ca_cert(nss_db_dir, cert_path: str, nickname: str = None) -> tuple:
         FileNotFoundError: If certificate file not found
         RuntimeError: If import fails
     """
-    _ensure_nss_db(nss_db_dir)
+    ensure_nss_db(nss_db_dir)
     nss_db_dir = Path(nss_db_dir)
     
     cert_file = Path(cert_path)
@@ -211,7 +211,7 @@ def import_server_cert(nss_db_dir, hostname: str, port: int = 443, nickname: str
     Raises:
         Exception: If certificate retrieval or import fails
     """
-    _ensure_nss_db(nss_db_dir)
+    ensure_nss_db(nss_db_dir)
     nss_db_dir = Path(nss_db_dir)
     
     # Use provided nickname or derive from hostname:port
@@ -271,7 +271,7 @@ def interactive_trust_server_cert(nss_db_dir, hostname: str, port: int = 443) ->
     Raises:
         Exception: If certificate retrieval or import fails
     """
-    _ensure_nss_db(nss_db_dir)
+    ensure_nss_db(nss_db_dir)
     
     # Check if certificate is already trusted
     if is_cert_trusted(nss_db_dir, hostname, port):

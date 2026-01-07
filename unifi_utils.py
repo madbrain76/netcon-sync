@@ -65,7 +65,7 @@ def _is_retryable_error(exc):
     return not isinstance(exc, nss.error.NSPRError)
 
 
-def _make_unifi_api_call(method: str, endpoint: str, **kwargs) -> dict:
+def make_unifi_api_call(method: str, endpoint: str, **kwargs) -> dict:
     """
     Handles common UniFi API request logic, including URL construction,
     error handling, and JSON parsing. Automatically retries on failure with exponential backoff.
@@ -152,7 +152,7 @@ def login() -> None:
     login_url = "/api/login"
     login_data = {"username": UNIFI_USERNAME, "password": UNIFI_PASSWORD}
     
-    _make_unifi_api_call("POST", login_url, json=login_data)
+    make_unifi_api_call("POST", login_url, json=login_data)
 
 
 def get_devices() -> list:
@@ -165,7 +165,7 @@ def get_devices() -> list:
     endpoint = f"/api/s/{UNIFI_SITE_ID}/stat/device"
     
     try:
-        devices_data = _make_unifi_api_call("GET", endpoint)
+        devices_data = make_unifi_api_call("GET", endpoint)
         return devices_data if isinstance(devices_data, list) else []
     except Exception as e:
         print(f"Error retrieving devices: {e}", file=__import__('sys').stderr)
@@ -260,13 +260,13 @@ def _derive_ieee_version_from_proto(proto) -> str:
     return ieee_map.get(proto_lower, "N/A")
 
 
-def _get_unifi_clients_fast() -> dict:
+def get_unifi_clients_fast() -> dict:
     """
     Fast lightweight fetch of UniFi clients WITHOUT DNS lookups.
     Returns a simple dict mapping MAC -> raw client data.
     For batch operations that don't need display formatting.
     """
-    all_known_clients = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
+    all_known_clients = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
     return {client.get("mac", "").lower(): client for client in all_known_clients if "mac" in client}
 
 
@@ -279,13 +279,13 @@ def get_all_unifi_clients() -> list:
     processed_clients = []
 
     # Fetch all known clients (contains configured fixed AP and general client info)
-    all_known_clients = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
+    all_known_clients = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
 
     # Fetch live connected clients (contains active fixed AP status, current IP, signal, etc.)
-    live_clients_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/sta")
+    live_clients_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/sta")
     
     # Fetch UniFi devices (APs) to map MACs to names
-    devices_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
+    devices_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
     
     # Create a map from AP MAC (lowercase) to AP Name for easy lookup
     ap_mac_to_name_map = {}
@@ -446,7 +446,7 @@ def _get_single_client_data_by_mac(client_mac: str) -> dict | None:
     """
     Internal helper to fetch the full RAW data for a single client from the /rest/user endpoint.
     """
-    all_clients_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
+    all_clients_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
 
     for client in all_clients_data:
         if client.get("mac") and client.get("mac").lower() == client_mac.lower():
@@ -467,7 +467,7 @@ def get_ap_mac_by_name(ap_name: str) -> str | None:
     """
     Retrieves an AP's MAC address from its name.
     """
-    devices_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
+    devices_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
 
     for device in devices_data:
         # Check 'name' first, then 'model' if 'name' is missing, then fallback to MAC itself
@@ -477,7 +477,7 @@ def get_ap_mac_by_name(ap_name: str) -> str | None:
     return None
 
 
-def _build_client_payload(original_client_data: dict) -> dict:
+def build_client_payload(original_client_data: dict) -> dict:
     """
     Constructs a clean payload for UniFi client PUT requests,
     including only the essential and writable fields, specifically targeting
@@ -555,14 +555,14 @@ def lock_client_to_ap(client_mac: str, ap_mac: str) -> bool:
 
     endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
     
-    payload = _build_client_payload(original_client_data)
+    payload = build_client_payload(original_client_data)
 
     # Specific changes for locking:
     payload["fixed_ap_mac"] = ap_mac.lower() # Add the specific AP MAC for locking
     payload["fixed_ap_enabled"] = True # Set to true for locking
 
     try:
-        _make_unifi_api_call("PUT", endpoint, json=payload)
+        make_unifi_api_call("PUT", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         return False
@@ -582,7 +582,7 @@ def unlock_client_from_ap(client_mac: str) -> bool:
 
     endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
     
-    payload = _build_client_payload(original_client_data)
+    payload = build_client_payload(original_client_data)
     
     # Specific changes for unlocking:
     # CRITICAL: fixed_ap_mac MUST BE ABSENT, not null, for unlock to work.
@@ -592,7 +592,7 @@ def unlock_client_from_ap(client_mac: str) -> bool:
     payload["fixed_ap_enabled"] = False # Set to false for unlocking
 
     try:
-        _make_unifi_api_call("PUT", endpoint, json=payload)
+        make_unifi_api_call("PUT", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         return False
@@ -616,8 +616,8 @@ def forget_client(mac: str) -> bool:
     payload = {"cmd": "forget-sta", "macs": [mac.lower()]}    
 
     try:
-        # Use _make_unifi_api_call for consistency
-        _make_unifi_api_call("POST", endpoint, json=payload)
+        # Use make_unifi_api_call for consistency
+        make_unifi_api_call("POST", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         return False
@@ -657,11 +657,11 @@ def forget_clients_batch(macs: list) -> dict:
     
     try:
         # Try batch forget first (faster)
-        _make_unifi_api_call("POST", endpoint, json=payload)
+        make_unifi_api_call("POST", endpoint, json=payload)
         
         # Verify that the clients were actually forgotten
         # Some UniFi versions silently fail for certain device types
-        remaining_clients = _get_unifi_clients_fast()
+        remaining_clients = get_unifi_clients_fast()
         remaining_macs = {mac.lower() for mac in remaining_clients.keys()}
         
         still_present = [mac for mac in mac_list if mac in remaining_macs]
@@ -728,8 +728,8 @@ def block_client(mac: str) -> bool:
     payload = {"cmd": "block-sta", "mac": mac.lower()}
 
     try:
-        # Use _make_unifi_api_call for consistency
-        _make_unifi_api_call("POST", endpoint, json=payload)
+        # Use make_unifi_api_call for consistency
+        make_unifi_api_call("POST", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         # Catches network errors, connection failures, or bad JSON responses
@@ -754,8 +754,8 @@ def unblock_client(mac: str) -> bool:
     payload = {"cmd": "unblock-sta", "mac": mac.lower()}
 
     try:
-        # Use _make_unifi_api_call for consistency
-        _make_unifi_api_call("POST", endpoint, json=payload)
+        # Use make_unifi_api_call for consistency
+        make_unifi_api_call("POST", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         # Catches network errors, connection failures, or bad JSON responses
@@ -781,8 +781,8 @@ def reconnect_client(mac: str) -> bool:
     payload = {"cmd": "kick-sta", "mac": mac.lower()}
 
     try:
-        # Use _make_unifi_api_call for consistency
-        _make_unifi_api_call("POST", endpoint, json=payload)
+        # Use make_unifi_api_call for consistency
+        make_unifi_api_call("POST", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         return False
@@ -836,7 +836,7 @@ def add_client(mac: str, name: str | None = None, note: str | None = None) -> bo
         method = "PUT"
         
         # Start with the existing data and apply updates
-        payload = _build_client_payload(existing_client) # Use the existing _build_client_payload
+        payload = build_client_payload(existing_client) # Use the existing build_client_payload
                                                          # to ensure consistent payload structure
         
         # Apply new name and note, respecting None
@@ -871,7 +871,7 @@ def add_client(mac: str, name: str | None = None, note: str | None = None) -> bo
                 payload.pop(key)
         
     try:
-        _make_unifi_api_call(method, endpoint, json=payload)
+        make_unifi_api_call(method, endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError) as e:
         print(f"Failed to add/update client {mac}: {e}", file=sys.stderr)
@@ -895,7 +895,7 @@ def restart_ap(ap_mac: str) -> bool:
     payload = {"cmd": "restart", "mac": ap_mac.lower()}
     
     try:
-        response = _make_unifi_api_call("POST", endpoint, json=payload)
+        response = make_unifi_api_call("POST", endpoint, json=payload)
         return True
     except (Exception, json.JSONDecodeError):
         return False
@@ -915,7 +915,7 @@ def get_ssids() -> list:
     """
     try:
         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/wlanconf"
-        return _make_unifi_api_call("GET", endpoint)
+        return make_unifi_api_call("GET", endpoint)
     except Exception:
         return []
 
@@ -960,7 +960,7 @@ def disable_ssid(ssid_name: str) -> bool:
         payload = matching_ssid.copy()
         payload["enabled"] = False
         
-        _make_unifi_api_call("PUT", endpoint, json=payload)
+        make_unifi_api_call("PUT", endpoint, json=payload)
         return True
         
     except (Exception, json.JSONDecodeError):
@@ -1007,7 +1007,7 @@ def enable_ssid(ssid_name: str) -> bool:
         payload = matching_ssid.copy()
         payload["enabled"] = True
         
-        _make_unifi_api_call("PUT", endpoint, json=payload)
+        make_unifi_api_call("PUT", endpoint, json=payload)
         return True
         
     except (Exception, json.JSONDecodeError):
@@ -1058,7 +1058,7 @@ def disable_ap(ap_mac: str) -> bool:
         payload = matching_ap.copy()
         payload["disabled"] = True
         
-        _make_unifi_api_call("PUT", endpoint, json=payload)
+        make_unifi_api_call("PUT", endpoint, json=payload)
         return True
         
     except (Exception, json.JSONDecodeError):
@@ -1109,7 +1109,7 @@ def enable_ap(ap_mac: str) -> bool:
         payload = matching_ap.copy()
         payload["disabled"] = False
         
-        _make_unifi_api_call("PUT", endpoint, json=payload)
+        make_unifi_api_call("PUT", endpoint, json=payload)
         return True
         
     except (Exception, json.JSONDecodeError):
@@ -1572,7 +1572,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
         
         # Fetch available firmware information from the controller
         try:
-            firmware_data = _make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/firmware")
+            firmware_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/firmware")
         except Exception as e:
             # If firmware endpoint doesn't work, use device's upgrade_to_firmware field instead
             firmware_data = []
@@ -1642,7 +1642,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
         }
         
         try:
-            response = _make_unifi_api_call("POST", endpoint, json=payload)
+            response = make_unifi_api_call("POST", endpoint, json=payload)
             
             # Valid responses are:
             # - Empty list [] (common for device commands like upgrade/restart)

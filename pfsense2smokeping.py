@@ -2,7 +2,6 @@ import sys
 import json
 import re
 import io
-import subprocess
 from collections import namedtuple
 
 # Define device categories with namedtuple
@@ -147,24 +146,16 @@ if __name__ == "__main__":
     # Initialize NSS database before any HTTPS connections
     import nss.nss as nss_core
     from pathlib import Path
-    import subprocess
+    from trust import ensure_nss_db
     
     nss_db_dir = Path.home() / ".netcon-sync"
-    nss_db_dir.mkdir(parents=True, exist_ok=True)
     
     # Create NSS database if it doesn't exist
-    cert_db = nss_db_dir / "cert9.db"
-    if not cert_db.exists():
-        try:
-            subprocess.run(
-                ["certutil", "-N", "-d", str(nss_db_dir), "-f", "/dev/null"],
-                check=True,
-                stderr=subprocess.PIPE,
-                stdout=subprocess.PIPE
-            )
-        except subprocess.CalledProcessError as e:
-            print(f"Error creating NSS database: {e.stderr.decode() if e.stderr else e}", file=sys.stderr)
-            sys.exit(1)
+    try:
+        ensure_nss_db(nss_db_dir)
+    except RuntimeError as e:
+        print(f"Error initializing NSS database: {e}", file=sys.stderr)
+        sys.exit(1)
     
     # Initialize NSS
     try:
