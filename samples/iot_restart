@@ -1,0 +1,5 @@
+#!/bin/bash
+unifi_climgr.py disable --ssids IOT
+sleep 60
+unifi_climgr.py enable --ssids IOT
+
