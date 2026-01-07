@@ -663,7 +663,7 @@ Examples:
     
     # Initialize NSS database
     nss_db_dir = Path.home() / ".netcon-sync"
-    _ensure_nss_db()
+    _ensure_nss_db(nss_db_dir)
     
     try:
         nss_core.nss_init(str(nss_db_dir))
@@ -674,10 +674,11 @@ Examples:
     # Handle trust command
     if args.command == "trust":
         try:
+            nss_db_dir = Path.home() / ".netcon-sync"
             if args.server:
-                handle_trust_server_url(PFSENSE_URL)
+                handle_trust_server_url(nss_db_dir, PFSENSE_URL)
             elif args.ca:
-                handle_trust_ca_cert(args.ca)
+                handle_trust_ca_cert(nss_db_dir, args.ca)
             print("Certificate trust operation completed successfully")
             return 0
         except Exception as e:

@@ -23,20 +23,22 @@ from urllib.parse import urlparse
 from http_tls_nss import get_server_certificate
 import nss.error
 
-# NSS database directory
-NSS_DB_DIR = Path.home() / ".netcon-sync"
-
-
-def _ensure_nss_db():
-    """Ensure the NSS database directory and files exist."""
-    NSS_DB_DIR.mkdir(parents=True, exist_ok=True)
+def _ensure_nss_db(nss_db_dir):
+    """
+    Ensure the NSS database directory and files exist.
+    
+    Args:
+        nss_db_dir: Path to NSS database directory
+    """
+    nss_db_dir = Path(nss_db_dir)
+    nss_db_dir.mkdir(parents=True, exist_ok=True)
     
     # Initialize NSS db if it doesn't exist
-    if not (NSS_DB_DIR / "cert9.db").exists():
+    if not (nss_db_dir / "cert9.db").exists():
         # Create empty database using certutil
         try:
             subprocess.run(
-                ["certutil", "-N", "-d", str(NSS_DB_DIR), "-f", "/dev/null"],
+                ["certutil", "-N", "-d", str(nss_db_dir), "-f", "/dev/null"],
                 check=True,
                 capture_output=True,
                 timeout=10
@@ -66,27 +68,29 @@ def get_cert_fingerprints(hostname: str, port: int = 443) -> dict:
     return get_server_certificate(hostname, port)
 
 
-def is_cert_trusted(hostname: str, port: int = 443) -> bool:
+def is_cert_trusted(nss_db_dir, hostname: str, port: int = 443) -> bool:
     """
     Check if a server certificate is trusted in the NSS database (non-interactive).
     
     Checks the trust attributes using certutil.
     
     Args:
+        nss_db_dir: Path to NSS database directory
         hostname (str): The hostname or IP address
         port (int): The port number (default: 443)
     
     Returns:
         bool: True if the certificate is trusted, False otherwise
     """
-    _ensure_nss_db()
+    _ensure_nss_db(nss_db_dir)
+    nss_db_dir = Path(nss_db_dir)
     
     try:
         nickname = f"{hostname}:{port}"
         
         # Use certutil to list all certificates and find ours
         result = subprocess.run(
-            ["certutil", "-L", "-d", str(NSS_DB_DIR)],
+            ["certutil", "-L", "-d", str(nss_db_dir)],
             capture_output=True,
             timeout=10,
             text=True
@@ -107,19 +111,21 @@ def is_cert_trusted(hostname: str, port: int = 443) -> bool:
         return False
 
 
-def _cert_exists(nickname: str) -> bool:
+def _cert_exists(nss_db_dir, nickname: str) -> bool:
     """
     Check if a certificate with the given nickname exists in the NSS database.
     
     Args:
+        nss_db_dir: Path to NSS database directory
         nickname (str): Certificate nickname to check
     
     Returns:
         bool: True if certificate exists, False otherwise
     """
+    nss_db_dir = Path(nss_db_dir)
     try:
         result = subprocess.run(
-            ["certutil", "-L", "-d", str(NSS_DB_DIR)],
+            ["certutil", "-L", "-d", str(nss_db_dir)],
             capture_output=True,
             timeout=10,
             text=True
@@ -135,7 +141,7 @@ def _cert_exists(nickname: str) -> bool:
         return False
 
 
-def import_ca_cert(cert_path: str, nickname: str = None) -> tuple:
+def import_ca_cert(nss_db_dir, cert_path: str, nickname: str = None) -> tuple:
     """
     Import a CA certificate (DER or PEM) into the NSS database.
     
@@ -143,6 +149,7 @@ def import_ca_cert(cert_path: str, nickname: str = None) -> tuple:
     If it does, returns without importing (idempotent).
     
     Args:
+        nss_db_dir: Path to NSS database directory
         cert_path (str): Path to certificate file (DER or PEM)
         nickname (str): Nickname for the certificate in NSS (optional)
     
@@ -153,7 +160,8 @@ def import_ca_cert(cert_path: str, nickname: str = None) -> tuple:
         FileNotFoundError: If certificate file not found
         RuntimeError: If import fails
     """
-    _ensure_nss_db()
+    _ensure_nss_db(nss_db_dir)
+    nss_db_dir = Path(nss_db_dir)
     
     cert_file = Path(cert_path)
     if not cert_file.exists():
@@ -164,7 +172,7 @@ def import_ca_cert(cert_path: str, nickname: str = None) -> tuple:
         nickname = cert_file.stem
     
     # Check if certificate already exists
-    if _cert_exists(nickname):
+    if _cert_exists(nss_db_dir, nickname):
         return (nickname, False)
     
     try:
@@ -172,7 +180,7 @@ def import_ca_cert(cert_path: str, nickname: str = None) -> tuple:
             [
                 "certutil",
                 "-A",
-                "-d", str(NSS_DB_DIR),
+                "-d", str(nss_db_dir),
                 "-n", nickname,
                 "-t", "CT,,",  # CT = Trusted CA certificate
                 "-i", str(cert_file)
@@ -187,11 +195,12 @@ def import_ca_cert(cert_path: str, nickname: str = None) -> tuple:
     return (nickname, True)
 
 
-def import_server_cert(hostname: str, port: int = 443, nickname: str = None) -> str:
+def import_server_cert(nss_db_dir, hostname: str, port: int = 443, nickname: str = None) -> str:
     """
     Fetch and import a server's certificate into the NSS database.
     
     Args:
+        nss_db_dir: Path to NSS database directory
         hostname (str): The hostname or IP address
         port (int): The port number (default: 443)
         nickname (str): Nickname for the certificate (optional)
@@ -202,7 +211,8 @@ def import_server_cert(hostname: str, port: int = 443, nickname: str = None) -> 
     Raises:
         Exception: If certificate retrieval or import fails
     """
-    _ensure_nss_db()
+    _ensure_nss_db(nss_db_dir)
+    nss_db_dir = Path(nss_db_dir)
     
     # Use provided nickname or derive from hostname:port
     if nickname is None:
@@ -222,7 +232,7 @@ def import_server_cert(hostname: str, port: int = 443, nickname: str = None) -> 
                 [
                     "certutil",
                     "-A",
-                    "-d", str(NSS_DB_DIR),
+                    "-d", str(nss_db_dir),
                     "-n", nickname,
                     "-t", "P,,",  # P = Trusted peer certificate
                     "-i", tmp_path
@@ -240,7 +250,7 @@ def import_server_cert(hostname: str, port: int = 443, nickname: str = None) -> 
     return nickname
 
 
-def interactive_trust_server_cert(hostname: str, port: int = 443) -> bool:
+def interactive_trust_server_cert(nss_db_dir, hostname: str, port: int = 443) -> bool:
     """
     Interactively prompt user to trust a server certificate.
     
@@ -251,6 +261,7 @@ def interactive_trust_server_cert(hostname: str, port: int = 443) -> bool:
     This function encapsulates all PKI display logic and user interaction.
     
     Args:
+        nss_db_dir: Path to NSS database directory
         hostname (str): The hostname or IP address
         port (int): The port number (default: 443)
     
@@ -260,10 +271,10 @@ def interactive_trust_server_cert(hostname: str, port: int = 443) -> bool:
     Raises:
         Exception: If certificate retrieval or import fails
     """
-    _ensure_nss_db()
+    _ensure_nss_db(nss_db_dir)
     
     # Check if certificate is already trusted
-    if is_cert_trusted(hostname, port):
+    if is_cert_trusted(nss_db_dir, hostname, port):
         print(f"[OK] Certificate for {hostname}:{port} is already trusted.")
         return True
     
@@ -291,7 +302,7 @@ def interactive_trust_server_cert(hostname: str, port: int = 443) -> bool:
             return False
         
         # Import the certificate
-        nickname = import_server_cert(hostname, port)
+        nickname = import_server_cert(nss_db_dir, hostname, port)
         print(f"\n[OK] Certificate imported as '{nickname}' and added to trusted store.")
         return True
         
@@ -354,18 +365,19 @@ OPTION 2 (Trust the server certificate directly):
 # CLI HANDLERS - Used by pfsense2unifi.py and unifi_climgr.py
 # ==============================================================================
 
-def handle_trust_ca_cert(cert_path: str) -> None:
+def handle_trust_ca_cert(nss_db_dir, cert_path: str) -> None:
     """
     CLI handler: Import a CA certificate from file into NSS database.
     Prints status messages and exits with appropriate code.
     
     Args:
+        nss_db_dir: Path to NSS database directory
         cert_path (str): Path to certificate file (DER or PEM format)
     
     This function exits with code 0 on success, 1 on failure.
     """
     try:
-        nickname, was_newly_imported = import_ca_cert(cert_path)
+        nickname, was_newly_imported = import_ca_cert(nss_db_dir, cert_path)
         if was_newly_imported:
             print(f"[OK] CA certificate imported as '{nickname}'")
         else:
@@ -376,12 +388,13 @@ def handle_trust_ca_cert(cert_path: str) -> None:
         sys.exit(1)
 
 
-def handle_trust_server_url(server_url: str) -> None:
+def handle_trust_server_url(nss_db_dir, server_url: str) -> None:
     """
     CLI handler: Interactively trust a server certificate from URL.
     Parses the URL, fetches the certificate, displays details, and imports if approved.
     
     Args:
+        nss_db_dir: Path to NSS database directory
         server_url (str): Server URL (e.g., https://example.com:8443)
     
     This function exits with code 0 on success, 1 on failure.
@@ -396,7 +409,7 @@ def handle_trust_server_url(server_url: str) -> None:
             sys.exit(1)
         
         # Let trust module handle all PKI details and user interaction
-        if interactive_trust_server_cert(hostname, port):
+        if interactive_trust_server_cert(nss_db_dir, hostname, port):
             sys.exit(0)
         else:
             sys.exit(1)

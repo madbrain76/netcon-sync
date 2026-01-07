@@ -48,6 +48,7 @@ import requests
 import argparse
 import nss.error
 import sys
+from pathlib import Path
 
 # Import configuration - UniFi is always required at import
 # pfSense config will be loaded later in main()
@@ -612,7 +613,8 @@ EXAMPLES:
             sys.exit(1)
         sync_pfsense_dhcp_to_unifi(delete_orphans=args.delete_orphans, suffix=args.suffix)
     elif args.action == "trust":
+        nss_db_dir = Path.home() / ".netcon-sync"
         if args.ca:
-            handle_trust_ca_cert(args.ca)
+            handle_trust_ca_cert(nss_db_dir, args.ca)
         elif args.server:
-            handle_trust_server_url(args.server)
+            handle_trust_server_url(nss_db_dir, args.server)

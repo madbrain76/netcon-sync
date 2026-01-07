@@ -30,6 +30,7 @@ import json
 import time
 from datetime import datetime, timedelta
 from collections import defaultdict
+from pathlib import Path
 import nss.error
 
 # Import shared modules - config might fail if env vars are missing
@@ -1802,6 +1803,11 @@ def add_filter_arguments(parser):
         help="Filter clients by MAC address (substring match)."
     )
     parser.add_argument(
+        "--filter_by_ssid",
+        type=str,
+        help="Filter clients by SSID (exact match)."
+    )
+    parser.add_argument(
         "--filter_signal_above",
         type=int,
         help="Filter clients with signal strength strictly ABOVE this value (e.g., -60 means > -60)."
@@ -1866,6 +1872,13 @@ def add_filter_arguments_for_list(parser):
         "--filter_hostname",
         type=str,
         help="Filter clients by exact hostname match (clients only)."
+    )
+    
+    # SSID filter (clients only)
+    parser.add_argument(
+        "--filter_by_ssid",
+        type=str,
+        help="Filter clients by SSID (exact match - clients only)."
     )
     
     # Signal strength filters (clients only)
@@ -1948,24 +1961,27 @@ if __name__ == "__main__":
             print("  unifi_climgr.py trust --server https://192.168.1.100:8443")
             sys.exit(1)
         
+        # NSS database path for trust operations
+        nss_db_dir = Path.home() / ".netcon-sync"
+        
         # Parse trust command options
         if sys.argv[2] == "--ca":
             if len(sys.argv) < 4:
                 print("ERROR: --ca requires a certificate path")
                 sys.exit(1)
             cert_path = sys.argv[3]
-            handle_trust_ca_cert(cert_path)
+            handle_trust_ca_cert(nss_db_dir, cert_path)
         elif sys.argv[2] == "--server":
             if len(sys.argv) < 4:
                 print("ERROR: --server requires a URL")
                 sys.exit(1)
             server_url = sys.argv[3]
-            handle_trust_server_url(server_url)
+            handle_trust_server_url(nss_db_dir, server_url)
         else:
             # For backwards compatibility: trust <URL> (without --server flag)
             # Only if it looks like a URL (contains ://)
             if "://" in sys.argv[2]:
-                handle_trust_server_url(sys.argv[2])
+                handle_trust_server_url(nss_db_dir, sys.argv[2])
             else:
                 print(f"ERROR: Invalid trust option: {sys.argv[2]}")
                 print("Use either --ca <CERT_PATH> or --server <HTTPS_URL>")
@@ -2295,6 +2311,7 @@ FILTERS FOR --clients:
     --filter_mac <MAC>           MAC address substring match
     --filter_dns_name <DNS>      Exact DNS name match
     --filter_hostname <NAME>     Exact hostname match
+    --filter_by_ssid <SSID>      SSID exact match
   
   Signal Strength Filters:
     --filter_signal_above <dBm>  Signal strength > dBm (e.g., -60)
@@ -2336,6 +2353,9 @@ EXAMPLES:
 
   # List locked clients with specific columns
   ./unifi_climgr.py list --clients --filter_locked +hostname +locked_ap_name
+
+  # List clients on a specific SSID
+  ./unifi_climgr.py list --clients --filter_by_ssid "MyNetwork"
 
   # List APs with weak signal clients connected
   ./unifi_climgr.py list --aps
@@ -2402,9 +2422,25 @@ EXAMPLES:
     reconnect_client_parser = subparsers.add_parser(
         'reconnect_client',
         help='Force clients to reconnect',
-        allow_abbrev=False
+        allow_abbrev=False,
+        epilog="""
+EXAMPLES:
+  # Reconnect all online clients (batch mode, no delay)
+  ./unifi_climgr.py reconnect_client --filter_online
+  
+  # Reconnect all online clients with 1 second delay between each
+  ./unifi_climgr.py reconnect_client --filter_online --delay 1000
+  
+  # Reconnect clients on specific SSID with 500ms delay
+  ./unifi_climgr.py reconnect_client --filter_by_ssid "MyNetwork" --delay 500
+        """
     )
     add_filter_arguments(reconnect_client_parser)
+    reconnect_client_parser.add_argument(
+        "--delay",
+        type=int,
+        help="Delay in milliseconds between reconnecting clients (default: 0 for batch mode). When specified, clients are reconnected one at a time."
+    )
 
     # ============================================================================
     # FORGET action
@@ -2752,6 +2788,11 @@ EXAMPLES:
                     # Hostname filter
                     if hasattr(args, 'filter_hostname') and args.filter_hostname:
                         if client.get("hostname") != args.filter_hostname:
+                            match = False
+                    
+                    # SSID filter
+                    if hasattr(args, 'filter_by_ssid') and args.filter_by_ssid:
+                        if client.get("live_ssid") != args.filter_by_ssid:
                             match = False
                     
                     # Signal strength filters
@@ -3958,6 +3999,9 @@ EXAMPLES:
             if hasattr(args, 'filter_hostname') and args.filter_hostname:
                 if client.get("hostname") != args.filter_hostname:
                     match = False
+            if hasattr(args, 'filter_by_ssid') and args.filter_by_ssid:
+                if client.get("live_ssid") != args.filter_by_ssid:
+                    match = False
             if hasattr(args, 'filter_mac') and args.filter_mac:
                 client_mac = client.get("mac", "")
                 if args.filter_mac.lower() not in client_mac.lower():
@@ -4028,13 +4072,41 @@ EXAMPLES:
             print_action_results_table(filtered_clients, "unlock", results)
         
         elif args.action == 'reconnect_client':
-            print("Reconnecting clients...")
-            results = {}
-            for client in filtered_clients:
-                mac = client.get("mac")
-                if mac:
-                    results[mac.lower()] = unifi_utils.reconnect_client(mac)
-            print_action_results_table(filtered_clients, "reconnect", results)
+            # Check if delay is specified for sequential reconnects
+            delay_ms = getattr(args, 'delay', None)
+            
+            if delay_ms is not None:
+                # Sequential mode with delay
+                print(f"Reconnecting clients sequentially with {delay_ms}ms delay...")
+                results = {}
+                total = len(filtered_clients)
+                for i, client in enumerate(filtered_clients):
+                    mac = client.get("mac")
+                    if mac:
+                        if i > 0:
+                            # Display countdown before reconnecting
+                            delay_sec = delay_ms / 1000.0
+                            print(f"[{i}/{total}] Waiting {delay_ms}ms before next client...", end="", flush=True)
+                            time.sleep(delay_sec)
+                            print("\r" + " " * 60 + "\r", end="", flush=True)  # Clear the line
+                        
+                        # Show which client is being reconnected
+                        hostname = client.get("hostname", client.get("name", "Unknown"))
+                        print(f"[{i+1}/{total}] Reconnecting {hostname} ({mac})...", end="", flush=True)
+                        results[mac.lower()] = unifi_utils.reconnect_client(mac)
+                        print(" OK")  # Mark complete
+                
+                print()  # Blank line before results table
+                print_action_results_table(filtered_clients, "reconnect", results)
+            else:
+                # Batch mode (default) - reconnect all at once
+                print("Reconnecting clients...")
+                results = {}
+                for client in filtered_clients:
+                    mac = client.get("mac")
+                    if mac:
+                        results[mac.lower()] = unifi_utils.reconnect_client(mac)
+                print_action_results_table(filtered_clients, "reconnect", results)
         
         elif args.action == 'forget':
             handle_forget_action_batch(filtered_clients)
