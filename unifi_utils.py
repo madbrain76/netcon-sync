@@ -65,7 +65,7 @@ def _is_retryable_error(exc):
     return not isinstance(exc, nss.error.NSPRError)
 
 
-def make_unifi_api_call(method: str, endpoint: str, **kwargs) -> dict:
+def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, **kwargs):
     """
     Handles common UniFi API request logic, including URL construction,
     error handling, and JSON parsing. Automatically retries on failure with exponential backoff.
@@ -78,10 +78,11 @@ def make_unifi_api_call(method: str, endpoint: str, **kwargs) -> dict:
     Args:
         method (str): HTTP method (e.g., "GET", "POST", "PUT").
         endpoint (str): The specific API endpoint (e.g., "/api/login", "/api/s/{site_id}/rest/user").
+        return_raw (bool): If True, return raw bytes instead of parsing JSON (for binary downloads).
         **kwargs: Additional keyword arguments (headers, json, data, etc.)
 
     Returns:
-        dict: The JSON response data.
+        dict or bytes: The JSON response data (dict) or raw bytes if return_raw=True.
 
     Raises:
         NSPRError: For NSS/NSPR certificate validation errors (no retry).
@@ -111,13 +112,20 @@ def make_unifi_api_call(method: str, endpoint: str, **kwargs) -> dict:
             # opener.request handles session state internally
             response = opener.request(method, url, data=body, headers=headers)
             
-            response_text = response.read().decode('utf-8')
+            # Read response data
+            response_bytes = response.read()
             
             # Check HTTP status
             if 400 <= response.getcode() < 600:
-                raise Exception(f"HTTP {response.getcode()}: {response_text}")
+                error_msg = response_bytes.decode('utf-8', errors='replace')
+                raise Exception(f"HTTP {response.getcode()}: {error_msg}")
             
-            # Parse and return response
+            # Return raw bytes if requested (for binary downloads)
+            if return_raw:
+                return response_bytes
+            
+            # Parse and return JSON response
+            response_text = response_bytes.decode('utf-8')
             response_data = json.loads(response_text) if response_text else {}
             return response_data.get("data", {}) if "stat" in endpoint or "rest" in endpoint or "cmd" in endpoint else response_data
             

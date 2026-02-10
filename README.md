@@ -31,6 +31,8 @@ Given this split between pfSense and Unifi, I selected the "source of truth" for
 - 🔄 **Automatic Retry** - Exponential backoff for transient failures
 - ✔️ **MAC Validation** - Strict format validation (colon delimiters)
 - 📊 **Detailed Reporting** - Clear breakdown of success/failed/filtered clients
+- 📥 **AP Log Collection** - Automatically collect logs from all UniFi APs via SSH/SCP
+- 💾 **DHCP Backup/Restore** - Backup and restore pfSense DHCP configurations
 
 ## Prerequisites
 
@@ -104,9 +106,12 @@ Trust a server certificate:
 .
 ├── pfsense2unifi.py           # Sync DHCP mappings from pfSense to UniFi
 ├── unifi_climgr.py            # UniFi client and AP management CLI
+├── unifi_collect_ap_logs.py   # Collect logs from all APs via SSH/SCP
+├── pfsense_dhcp.py            # pfSense DHCP backup and restore
+├── pfsense2smokeping.py       # Generate Smokeping configuration from pfSense
 ├── pfsense_utils.py           # pfSense API utilities
 ├── unifi_utils.py             # UniFi API utilities
-├── unifi_network_manager.py    # Comprehensive network management CLI
+├── unifi_network_manager.py   # Comprehensive network management CLI
 ├── config.py                  # Configuration management
 ├── trust.py                   # Certificate handling
 ├── http_tls_nss.py            # NSS/NSPR HTTP client
@@ -115,6 +120,7 @@ Trust a server certificate:
 ├── README.md                  # This file (overview)
 ├── pfsense2unifi.md           # pfsense2unifi.py documentation
 ├── unifi_climgr.md            # unifi_climgr.py documentation
+├── unifi_collect_ap_logs.md   # unifi_collect_ap_logs.py documentation
 └── LICENSE                    # GPL-3.0 license
 ```
 

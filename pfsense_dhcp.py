@@ -144,7 +144,7 @@ class PfSenseClient:
             
             # Successful login redirects or shows dashboard
             if "Dashboard" in response_text or response.getcode() in (200, 302):
-                print("✓ Authentication successful")
+                print("OK: Authentication successful")
                 return True
             
             raise Exception("Login failed: Unexpected response")
@@ -241,7 +241,7 @@ class PfSenseClient:
                     raise Exception("Received HTML instead of XML - possibly not authenticated")
                 raise Exception("Invalid response format (not XML)")
             
-            print("✓ Configuration downloaded successfully")
+            print("OK: Configuration downloaded successfully")
             return config_xml
             
         except Exception as e:
@@ -375,7 +375,7 @@ class PfSenseClient:
             response_lower = response_text.lower()
             
             if any(msg in response_lower for msg in success_messages):
-                print("✓ Configuration restored successfully")
+                print("OK: Configuration restored successfully")
                 print("\nNOTE: pfSense configuration has been updated.")
                 print("      Changes may require services to be restarted.")
                 print("      Check pfSense web UI for any warnings or required actions.")
@@ -391,7 +391,7 @@ class PfSenseClient:
                 else:
                     raise Exception("Restore failed (error detected but not parsed)")
             
-            print("⚠ Restore request completed but success unclear")
+            print("WARNING: Restore request completed but success unclear")
             print("  Please check pfSense web UI to verify restore status")
             return {"success": None, "message": "Restore request completed - verify in pfSense UI"}
             
@@ -697,7 +697,7 @@ Examples:
             # Save XML
             output_path = Path(args.output)
             output_path.write_text(xml_data)
-            print(f"✓ Configuration saved to: {output_path}")
+            print(f"OK: Configuration saved to: {output_path}")
             
             # Parse and display
             config = parse_dhcp_config(xml_data, args.interface)
@@ -721,7 +721,7 @@ Examples:
                 print(f"ERROR: Invalid configuration: {validation['message']}", file=sys.stderr)
                 return 1
             
-            print(f"✓ Configuration validated: {validation['type']}")
+            print(f"OK: Configuration validated: {validation['type']}")
             if "interfaces" in validation:
                 print(f"  Interfaces: {', '.join(validation['interfaces'])}")
             
@@ -731,11 +731,11 @@ Examples:
             
             # Dry-run mode
             if args.dry_run:
-                print("\n✓ Dry-run mode: No changes made to pfSense")
+                print("\nOK: Dry-run mode: No changes made to pfSense")
                 return 0
             
             # Confirm restore
-            print("\n⚠ WARNING: This will REPLACE the current DHCP configuration!")
+            print("\nWARNING: This will REPLACE the current DHCP configuration!")
             print("           Make sure you have a backup before proceeding.")
             response = input("\nProceed with restore? (yes/no): ").strip().lower()
             
