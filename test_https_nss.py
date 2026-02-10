@@ -78,7 +78,7 @@ def init_nss_db(nss_db_dir):
                 timeout=5
             )
             if "cifs" in df_result.stdout.lower() or "nfs" in df_result.stdout.lower():
-                print("⚠  WARNING: NSS databases may not work properly on network filesystems (CIFS/NFS)")
+                print("WARNING:  WARNING: NSS databases may not work properly on network filesystems (CIFS/NFS)")
                 print("   Consider using a local path like ~/nss_test_db")
         except:
             pass  # Ignore if df check fails
@@ -90,7 +90,7 @@ def init_nss_db(nss_db_dir):
             print(f"  NSS database already exists at: {nss_db_dir}")
             # Test that it can be initialized
             nss_core.nss_init(str(nss_db_dir))
-            print("✓ NSS database verified successfully")
+            print("[OK] NSS database verified successfully")
             return True
         
         # Create new NSS database using trust module
@@ -107,7 +107,7 @@ def init_nss_db(nss_db_dir):
         
         # Initialize NSS to verify
         nss_core.nss_init(str(nss_db_dir))
-        print("✓ NSS database initialized successfully")
+        print("[OK] NSS database initialized successfully")
         return True
         
     except Exception as e:
@@ -135,7 +135,7 @@ def trust_ca_certificate(nss_db_dir, ca_file):
     
     try:
         handle_trust_ca_cert(nss_db_dir, ca_file)
-        print("✓ CA certificate trusted successfully")
+        print("[OK] CA certificate trusted successfully")
         return True
     except Exception as e:
         print(f"ERROR: Failed to trust CA certificate: {e}", file=sys.stderr)
@@ -161,7 +161,7 @@ def trust_server_certificate(nss_db_dir, url):
     
     try:
         handle_trust_server_url(nss_db_dir, url)
-        print("✓ Server certificate trusted successfully")
+        print("[OK] Server certificate trusted successfully")
         return True
     except Exception as e:
         print(f"ERROR: Failed to trust server certificate: {e}", file=sys.stderr)
@@ -195,7 +195,7 @@ def fetch_https_url(url, show_headers=False, max_content=1000):
         headers = response.info()
         content = response.read()
         
-        print(f"✓ Request successful")
+        print(f"[OK] Request successful")
         print(f"  Status Code: {status_code}")
         print(f"  Content Length: {len(content)} bytes")
         print(f"  Content Type: {headers.get('Content-Type', 'unknown')}")

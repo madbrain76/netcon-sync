@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2025 netcon-sync contributors
 # 
@@ -106,7 +106,7 @@ def get_ssh_credentials():
             password = mgmt_settings.get('x_ssh_password', '')
             
             if username and password:
-                print(f"✓ Retrieved SSH credentials (username: {username})")
+                print(f"[OK] Retrieved SSH credentials (username: {username})")
                 return username, password
     except Exception as e:
         print(f"Warning: Could not retrieve SSH credentials from settings: {e}")
@@ -121,7 +121,7 @@ def get_ssh_credentials():
             password = sysinfo_data.get('x_ssh_password', '')
             
             if username and password:
-                print(f"✓ Retrieved SSH credentials from sysinfo (username: {username})")
+                print(f"[OK] Retrieved SSH credentials from sysinfo (username: {username})")
                 return username, password
     except Exception as e:
         print(f"Warning: Could not retrieve SSH credentials from sysinfo: {e}")
@@ -262,30 +262,30 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
             )
         except paramiko.ssh_exception.AuthenticationException as e:
             result['error'] = f"Authentication failed: {e}"
-            print(f"[{ap_name}] ✗ Authentication failed - ABORTING")
+            print(f"[{ap_name}] [FAIL] Authentication failed - ABORTING")
             return result
         except paramiko.ssh_exception.NoValidConnectionsError as e:
             result['error'] = f"Connection failed: {e}"
-            print(f"[{ap_name}] ✗ Connection failed - ABORTING")
+            print(f"[{ap_name}] [FAIL] Connection failed - ABORTING")
             return result
         except Exception as e:
             result['error'] = f"SSH connection error: {e}"
-            print(f"[{ap_name}] ✗ SSH connection error - ABORTING")
+            print(f"[{ap_name}] [FAIL] SSH connection error - ABORTING")
             return result
         
-        print(f"[{ap_name}] ✓ Connected")
+        print(f"[{ap_name}] [OK] Connected")
         
         # Verify we can execute commands
         try:
             stdout, stderr, exit_code = execute_ssh_command(ssh_client, 'echo "test"', timeout=10)
             if stdout.strip() != "test":
                 result['error'] = "SSH command execution verification failed"
-                print(f"[{ap_name}] ✗ Command execution failed - ABORTING")
+                print(f"[{ap_name}] [FAIL] Command execution failed - ABORTING")
                 return result
-            print(f"[{ap_name}] ✓ Command execution verified")
+            print(f"[{ap_name}] [OK] Command execution verified")
         except Exception as e:
             result['error'] = f"Command execution failed: {e}"
-            print(f"[{ap_name}] ✗ Command execution failed - ABORTING")
+            print(f"[{ap_name}] [FAIL] Command execution failed - ABORTING")
             return result
         
         # Create AP-specific directory (include MAC address for uniqueness)
@@ -350,7 +350,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                         # Extract size from ls output
                         size_match = re.search(r'(\d+(?:\.\d+)?[KMG]?)\s+\w+\s+\d+\s+[\d:]+\s+/tmp/support\.tgz', ls_stdout)
                         size_str = size_match.group(1) if size_match else 'unknown size'
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path} ({size_str})")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path} ({size_str})")
                     else:
                         print(f"[{ap_name}]   supp: file not found after command completed")
                 else:
@@ -378,7 +378,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 if match:
                     support_bundle_path = match.group(1)
                     support_bundle_generated = True
-                    print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                    print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                 else:
                     # Check for recently created files (last 3 minutes)
                     stdin2, stdout2, stderr2 = ssh_client.exec_command(
@@ -390,7 +390,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if file_path:
                         support_bundle_path = file_path
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                     else:
                         print(f"[{ap_name}]   syswrapper.sh get-support: no output file found")
                         print(f"[{ap_name}]   Output (first 300 chars): {output[:300]}...")
@@ -416,7 +416,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 if match:
                     support_bundle_path = match.group(1)
                     support_bundle_generated = True
-                    print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                    print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                 else:
                     # Check for recently created files
                     stdin2, stdout2, stderr2 = ssh_client.exec_command(
@@ -428,7 +428,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if file_path:
                         support_bundle_path = file_path
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                     else:
                         print(f"[{ap_name}]   ubnt-systool support: no output file found")
                         print(f"[{ap_name}]   Output (first 300 chars): {output[:300]}...")
@@ -452,7 +452,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if match:
                         support_bundle_path = match.group(1)
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                         break
                     else:
                         # Check for recently created support files
@@ -473,7 +473,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                             if recent_file:
                                 support_bundle_path = file_path
                                 support_bundle_generated = True
-                                print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                                print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                                 break
                 except Exception as e:
                     print(f"[{ap_name}]   '{cmd}' failed: {e}")
@@ -501,7 +501,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                         f.write(output)
                     
                     output_size = len(output.encode('utf-8'))
-                    print(f" ✓ ({output_size:,} bytes)")
+                    print(f" [OK] ({output_size:,} bytes)")
                     
                     result['files'].append({
                         'remote_path': 'mca-dump (stdout)',
@@ -512,7 +512,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     
                     # Don't set support_bundle_generated - mca-dump JSON is complementary
                     # We still want to collect tar-based bundles from other methods
-                    print(f"[{ap_name}] ✓ mca-dump output saved: {local_filename}")
+                    print(f"[{ap_name}] [OK] mca-dump output saved: {local_filename}")
                 else:
                     # Maybe it's a file-based version, check for file path
                     import re
@@ -520,7 +520,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if match:
                         support_bundle_path = match.group(1)
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                     else:
                         print(f"[{ap_name}]   mca-dump: unexpected output format (first 100 chars: {output[:100]}...)")
             except Exception as e:
@@ -542,7 +542,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 if match:
                     support_bundle_path = match.group(1)
                     support_bundle_generated = True
-                    print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                    print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                 else:
                     # Check for common support bundle file patterns
                     stdin2, stdout2, stderr2 = ssh_client.exec_command(
@@ -562,7 +562,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                         if recent_file:
                             support_bundle_path = file_path
                             support_bundle_generated = True
-                            print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                            print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                         else:
                             print(f"[{ap_name}]   get-support: found old file, not using it")
                     else:
@@ -595,7 +595,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if exists == "EXISTS":
                         support_bundle_path = tar_path
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
                     else:
                         print(f"[{ap_name}]   mca-cli-op: tar file not found at {tar_path}")
                 else:
@@ -620,7 +620,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 if file_path:
                     support_bundle_path = file_path
                     support_bundle_generated = True
-                    print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                    print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
             except Exception as e:
                 print(f"[{ap_name}]   info command failed: {e}")
         
@@ -642,7 +642,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if match:
                         support_bundle_path = match.group(1)
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
             except Exception as e:
                 print(f"[{ap_name}]   syswrapper.sh not available or failed: {e}")
         
@@ -662,7 +662,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     if match:
                         support_bundle_path = match.group(1)
                         support_bundle_generated = True
-                        print(f"[{ap_name}] ✓ Support bundle generated: {support_bundle_path}")
+                        print(f"[{ap_name}] [OK] Support bundle generated: {support_bundle_path}")
             except Exception as e:
                 print(f"[{ap_name}]   ubnt-systool not available or failed: {e}")
         
@@ -686,7 +686,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 if size_str and int(size_str) > 0:
                     support_bundle_path = archive_name
                     support_bundle_generated = True
-                    print(f"[{ap_name}] ✓ Manual log archive created: {support_bundle_path}")
+                    print(f"[{ap_name}] [OK] Manual log archive created: {support_bundle_path}")
             except Exception as e:
                 print(f"[{ap_name}]   Manual archive creation failed: {e}")
         
@@ -725,7 +725,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                     scp.get(remote_path, str(local_path))
                 
                 actual_size = Path(local_path).stat().st_size
-                print(f" ✓")
+                print(f" [OK]")
                 
                 # Append to result dict
                 result['files'].append({
@@ -737,7 +737,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 return True
                     
             except Exception as e:
-                print(f" ✗ Failed: {e}")
+                print(f" [FAIL] Failed: {e}")
                 return False
         
         # Download the support bundle if generated
@@ -780,14 +780,14 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
         # Check if we got any files at all
         if not result['files']:
             result['error'] = "No log files collected"
-            print(f"[{ap_name}] ⚠ No log files were collected")
+            print(f"[{ap_name}] WARNING: No log files were collected")
         else:
             result['success'] = True
-            print(f"[{ap_name}] ✓ Downloaded {len(result['files'])} file(s) to {ap_dir}")
+            print(f"[{ap_name}] [OK] Downloaded {len(result['files'])} file(s) to {ap_dir}")
         
     except Exception as e:
         result['error'] = str(e)
-        print(f"[{ap_name}] ✗ Error: {e}")
+        print(f"[{ap_name}] [FAIL] Error: {e}")
     finally:
         if ssh_client:
             try:
@@ -800,9 +800,9 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
         completion_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         
         if result['success']:
-            print(f"[{ap_name}] [{completion_timestamp}] ✓ Completed in {result['elapsed_time']:.1f}s")
+            print(f"[{ap_name}] [{completion_timestamp}] [OK] Completed in {result['elapsed_time']:.1f}s")
         else:
-            print(f"[{ap_name}] [{completion_timestamp}] ✗ Failed after {result['elapsed_time']:.1f}s")
+            print(f"[{ap_name}] [{completion_timestamp}] [FAIL] Failed after {result['elapsed_time']:.1f}s")
     
     # Add timestamps to result
     result['start_timestamp'] = start_timestamp
@@ -844,10 +844,10 @@ def collect_controller_support_file(output_dir):
         
         try:
             gen_result = unifi_utils.make_unifi_api_call('POST', endpoint, json=payload)
-            print("[CONTROLLER] ✓ Support file generation initiated")
+            print("[CONTROLLER] [OK] Support file generation initiated")
         except Exception as e:
             result['error'] = f"Failed to initiate support file generation: {e}"
-            print(f"[CONTROLLER] ✗ Failed to initiate generation: {e}")
+            print(f"[CONTROLLER] [FAIL] Failed to initiate generation: {e}")
             result['elapsed_time'] = time.time() - start_time
             return result
         
@@ -897,7 +897,7 @@ def collect_controller_support_file(output_dir):
                 download_time = time.time() - download_start
                 speed_mbps = (total_bytes / (1024 * 1024)) / download_time if download_time > 0 else 0
                 
-                print(f"[CONTROLLER] ✓ Downloaded support file ({total_bytes} bytes) in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
+                print(f"[CONTROLLER] [OK] Downloaded support file ({total_bytes} bytes) in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
                 sys.stdout.flush()
                 
                 download_success = True
@@ -912,7 +912,7 @@ def collect_controller_support_file(output_dir):
         
         if not download_success:
             result['error'] = "Could not download support file from any known endpoint"
-            print(f"[CONTROLLER] ✗ {result['error']}")
+            print(f"[CONTROLLER] [FAIL] {result['error']}")
             result['elapsed_time'] = time.time() - start_time
             return result
         
@@ -922,12 +922,12 @@ def collect_controller_support_file(output_dir):
         result['elapsed_time'] = time.time() - start_time
         
         size_mb = total_bytes / (1024 * 1024)
-        print(f"[CONTROLLER] ✓ Saved to {filename} ({size_mb:.1f} MB)")
+        print(f"[CONTROLLER] [OK] Saved to {filename} ({size_mb:.1f} MB)")
         sys.stdout.flush()
         
     except Exception as e:
         result['error'] = f"Unexpected error: {e}"
-        print(f"[CONTROLLER] ✗ Error: {e}")
+        print(f"[CONTROLLER] [FAIL] Error: {e}")
     
     # Ensure elapsed_time is always set
     if result['elapsed_time'] == 0:
@@ -938,9 +938,9 @@ def collect_controller_support_file(output_dir):
     result['end_timestamp'] = completion_timestamp
     
     if result['success']:
-        print(f"[CONTROLLER] [{completion_timestamp}] ✓ Completed in {result['elapsed_time']:.1f}s")
+        print(f"[CONTROLLER] [{completion_timestamp}] [OK] Completed in {result['elapsed_time']:.1f}s")
     else:
-        print(f"[CONTROLLER] [{completion_timestamp}] ✗ Failed after {result['elapsed_time']:.1f}s")
+        print(f"[CONTROLLER] [{completion_timestamp}] [FAIL] Failed after {result['elapsed_time']:.1f}s")
     
     return result
 
@@ -1106,7 +1106,7 @@ Certificate Trust:
         # Login to controller
         print("Logging into UniFi controller...")
         unifi_utils.login()
-        print("✓ Login successful")
+        print("[OK] Login successful")
         
         # Get SSH credentials
         ssh_username = args.ssh_username
@@ -1201,7 +1201,7 @@ Certificate Trust:
             
             if not ap_ip:
                 with print_lock:
-                    print(f"⚠ Skipping {ap_name}: No IP address")
+                    print(f"WARNING: Skipping {ap_name}: No IP address")
                 return {
                     'ap_name': ap_name,
                     'ap_mac': ap_mac,
@@ -1212,7 +1212,7 @@ Certificate Trust:
             
             if ap.get("state") != 1:
                 with print_lock:
-                    print(f"⚠ Warning: AP is {ap_state}")
+                    print(f"WARNING: Warning: AP is {ap_state}")
             
             result = collect_logs_from_ap(
                 ap_ip=ap_ip,
@@ -1289,8 +1289,8 @@ Certificate Trust:
         print(f"Collection end:   {collection_end_timestamp}")
         print(f"Total collection time: {collection_elapsed:.1f}s")
         print(f"\nTotal APs processed: {len(results)}")
-        print(f"  ✓ Successful: {len(successful)}")
-        print(f"  ✗ Failed: {len(failed)}")
+        print(f"  [OK] Successful: {len(successful)}")
+        print(f"  [FAIL] Failed: {len(failed)}")
         print(f"\nTotal files collected: {total_files}")
         print(f"Total size: {total_size:,} bytes ({total_size / 1024 / 1024:.2f} MB)")
         if total_files > 0:
@@ -1309,13 +1309,13 @@ Certificate Trust:
             # Format directory name the same way as it's created
             safe_ap_name = ap_name.replace('/', '_').replace(' ', '_')
             dir_name = f"{safe_ap_name}_{ap_mac.replace(':', '-')}"
-            print(f"  • {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB), {elapsed:.1f}s")
+            print(f"  - {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB), {elapsed:.1f}s")
             print(f"    Start: {start_ts}  End: {end_ts}")
         
         if failed:
             print(f"\nFailed APs:")
             for r in failed:
-                print(f"  • {r['ap_name']} ({r['ap_ip']}): {r.get('error', 'Unknown error')}")
+                print(f"  - {r['ap_name']} ({r['ap_ip']}): {r.get('error', 'Unknown error')}")
         
         # Show controller support file status
         if controller_result['success']:
@@ -1332,7 +1332,7 @@ Certificate Trust:
             print(f"\nController support file: {Path(controller_result['file_path']).name} ({size_display}, {ctrl_elapsed:.1f}s)")
             print(f"  Start: {ctrl_start}  End: {ctrl_end}")
         else:
-            print(f"\n⚠ Controller support file collection failed: {controller_result.get('error', 'Unknown error')}")
+            print(f"\nWARNING: Controller support file collection failed: {controller_result.get('error', 'Unknown error')}")
         
         # Save summary to JSON
         summary_file = collection_dir / "collection_summary.json"
@@ -1350,7 +1350,7 @@ Certificate Trust:
         with open(summary_file, 'w') as f:
             json.dump(summary_data, f, indent=2)
         
-        print(f"\n✓ Summary saved to: {summary_file}")
+        print(f"\n[OK] Summary saved to: {summary_file}")
         
         # Create tarball of all collected files in output directory
         print(f"\nCreating tarball...")
@@ -1372,16 +1372,16 @@ Certificate Trust:
             else:
                 size_display = f"{tarball_size} bytes"
             
-            print(f"✓ Created {tarball_path} ({size_display})")
+            print(f"[OK] Created {tarball_path} ({size_display})")
             
             # Delete collection directory after successful tarball creation
             shutil.rmtree(collection_dir)
-            print(f"✓ Cleaned up collection directory")
+            print(f"[OK] Cleaned up collection directory")
             
             tarball_elapsed = time.time() - tarball_start_time
             print(f"\nTarball creation took {tarball_elapsed:.1f}s")
         except Exception as e:
-            print(f"⚠ Failed to create tarball: {e}")
+            print(f"WARNING: Failed to create tarball: {e}")
         
         return 0 if len(failed) == 0 else 1
         
