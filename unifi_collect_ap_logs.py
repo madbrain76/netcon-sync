@@ -804,6 +804,10 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
         else:
             print(f"[{ap_name}] [{completion_timestamp}] ✗ Failed after {result['elapsed_time']:.1f}s")
     
+    # Add timestamps to result
+    result['start_timestamp'] = start_timestamp
+    result['end_timestamp'] = completion_timestamp
+    
     return result
 
 
@@ -822,11 +826,14 @@ def collect_controller_support_file(output_dir):
         'file_path': None,
         'size': 0,
         'error': None,
-        'elapsed_time': 0
+        'elapsed_time': 0,
+        'start_timestamp': None,
+        'end_timestamp': None
     }
     
     start_time = time.time()
     start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    result['start_timestamp'] = start_timestamp
     
     try:
         print(f"\n[CONTROLLER] [{start_timestamp}] Generating network support file...")
@@ -928,6 +935,8 @@ def collect_controller_support_file(output_dir):
     
     # Print completion timestamp
     completion_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    result['end_timestamp'] = completion_timestamp
+    
     if result['success']:
         print(f"[CONTROLLER] [{completion_timestamp}] ✓ Completed in {result['elapsed_time']:.1f}s")
     else:
@@ -1218,8 +1227,16 @@ Certificate Trust:
             return result
         
         # Parallel collection
-        max_workers = args.parallel if args.parallel > 0 else len(filtered_aps)
+        # Calculate workers: all APs + 1 for controller (to ensure true parallelism)
+        if args.parallel > 0:
+            max_workers = args.parallel + 1  # Add 1 for controller support file
+        else:
+            max_workers = len(filtered_aps) + 1  # All APs + controller
         print(f"Using parallel collection with {max_workers} worker(s)\n")
+        
+        # Track overall collection timing
+        collection_start_time = time.time()
+        collection_start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         
         # Create AP info tuples with index
         ap_infos = [(i, len(filtered_aps), ap) for i, ap in enumerate(filtered_aps, 1)]
@@ -1238,6 +1255,11 @@ Certificate Trust:
             
             # Wait for controller support file collection
             controller_result = controller_future.result()
+        
+        # Track overall collection timing
+        collection_end_time = time.time()
+        collection_end_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        collection_elapsed = collection_end_time - collection_start_time
         
         # Print summary
         print(f"\n{'='*60}")
@@ -1263,7 +1285,10 @@ Certificate Trust:
         print(f"\n" + "="*60)
         print(f"COLLECTION SUMMARY")
         print(f"="*60)
-        print(f"Total APs processed: {len(results)}")
+        print(f"Collection start: {collection_start_timestamp}")
+        print(f"Collection end:   {collection_end_timestamp}")
+        print(f"Total collection time: {collection_elapsed:.1f}s")
+        print(f"\nTotal APs processed: {len(results)}")
         print(f"  ✓ Successful: {len(successful)}")
         print(f"  ✗ Failed: {len(failed)}")
         print(f"\nTotal files collected: {total_files}")
@@ -1279,10 +1304,13 @@ Certificate Trust:
             ap_name = r['ap_name']
             ap_mac = r.get('ap_mac', 'unknown')
             elapsed = r.get('elapsed_time', 0)
+            start_ts = r.get('start_timestamp', 'N/A')
+            end_ts = r.get('end_timestamp', 'N/A')
             # Format directory name the same way as it's created
             safe_ap_name = ap_name.replace('/', '_').replace(' ', '_')
             dir_name = f"{safe_ap_name}_{ap_mac.replace(':', '-')}"
             print(f"  • {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB), {elapsed:.1f}s")
+            print(f"    Start: {start_ts}  End: {end_ts}")
         
         if failed:
             print(f"\nFailed APs:")
@@ -1293,6 +1321,8 @@ Certificate Trust:
         if controller_result['success']:
             ctrl_size = controller_result['size']
             ctrl_elapsed = controller_result.get('elapsed_time', 0)
+            ctrl_start = controller_result.get('start_timestamp', 'N/A')
+            ctrl_end = controller_result.get('end_timestamp', 'N/A')
             if ctrl_size > 1024*1024:
                 size_display = f"{ctrl_size/1024/1024:.1f} MB"
             elif ctrl_size > 1024:
@@ -1300,6 +1330,7 @@ Certificate Trust:
             else:
                 size_display = f"{ctrl_size} bytes"
             print(f"\nController support file: {Path(controller_result['file_path']).name} ({size_display}, {ctrl_elapsed:.1f}s)")
+            print(f"  Start: {ctrl_start}  End: {ctrl_end}")
         else:
             print(f"\n⚠ Controller support file collection failed: {controller_result.get('error', 'Unknown error')}")
         
@@ -1323,6 +1354,7 @@ Certificate Trust:
         
         # Create tarball of all collected files in output directory
         print(f"\nCreating tarball...")
+        tarball_start_time = time.time()
         tarball_name = f"ap-log-{timestamp}.tgz"
         tarball_path = args.output / tarball_name
         
@@ -1345,6 +1377,9 @@ Certificate Trust:
             # Delete collection directory after successful tarball creation
             shutil.rmtree(collection_dir)
             print(f"✓ Cleaned up collection directory")
+            
+            tarball_elapsed = time.time() - tarball_start_time
+            print(f"\nTarball creation took {tarball_elapsed:.1f}s")
         except Exception as e:
             print(f"⚠ Failed to create tarball: {e}")
         
