@@ -65,7 +65,7 @@ def _is_retryable_error(exc):
     return not isinstance(exc, nss.error.NSPRError)
 
 
-def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, **kwargs):
+def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, stream: bool = False, **kwargs):
     """
     Handles common UniFi API request logic, including URL construction,
     error handling, and JSON parsing. Automatically retries on failure with exponential backoff.
@@ -79,10 +79,12 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, **
         method (str): HTTP method (e.g., "GET", "POST", "PUT").
         endpoint (str): The specific API endpoint (e.g., "/api/login", "/api/s/{site_id}/rest/user").
         return_raw (bool): If True, return raw bytes instead of parsing JSON (for binary downloads).
+        stream (bool): If True, return response object for streaming (caller must read and close).
         **kwargs: Additional keyword arguments (headers, json, data, etc.)
 
     Returns:
-        dict or bytes: The JSON response data (dict) or raw bytes if return_raw=True.
+        dict, bytes, or response object: JSON data (dict), raw bytes if return_raw=True,
+                                         or response object if stream=True.
 
     Raises:
         NSPRError: For NSS/NSPR certificate validation errors (no retry).
@@ -112,13 +114,17 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, **
             # opener.request handles session state internally
             response = opener.request(method, url, data=body, headers=headers)
             
+            # Check HTTP status before reading body
+            if 400 <= response.getcode() < 600:
+                error_msg = response.read().decode('utf-8', errors='replace')
+                raise Exception(f"HTTP {response.getcode()}: {error_msg}")
+            
+            # If streaming, return response object for caller to read
+            if stream:
+                return response
+            
             # Read response data
             response_bytes = response.read()
-            
-            # Check HTTP status
-            if 400 <= response.getcode() < 600:
-                error_msg = response_bytes.decode('utf-8', errors='replace')
-                raise Exception(f"HTTP {response.getcode()}: {error_msg}")
             
             # Return raw bytes if requested (for binary downloads)
             if return_raw:

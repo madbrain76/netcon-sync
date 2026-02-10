@@ -27,7 +27,7 @@ This script:
 Requires paramiko for SSH operations.
 No SFTP subsystem required - uses SSH command execution for file transfer.
 
-Version: 2025-02-09-v18 (added controller support file collection)
+Version: 2025-02-10-v20 (streaming controller download for faster performance)
 """
 
 import os
@@ -235,13 +235,16 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
         'ap_ip': ap_ip,
         'success': False,
         'files': [],
-        'error': None
+        'error': None,
+        'elapsed_time': 0
     }
     
+    start_time = time.time()
+    start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     ssh_client = None
     
     try:
-        print(f"\n[{ap_name}] Connecting to {ap_ip}...")
+        print(f"\n[{ap_name}] [{start_timestamp}] Connecting to {ap_ip}...")
         
         # Create SSH client
         ssh_client = paramiko.SSHClient()
@@ -791,6 +794,15 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 ssh_client.close()
             except:
                 pass
+        
+        # Calculate elapsed time and add completion timestamp
+        result['elapsed_time'] = time.time() - start_time
+        completion_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        if result['success']:
+            print(f"[{ap_name}] [{completion_timestamp}] ✓ Completed in {result['elapsed_time']:.1f}s")
+        else:
+            print(f"[{ap_name}] [{completion_timestamp}] ✗ Failed after {result['elapsed_time']:.1f}s")
     
     return result
 
@@ -809,11 +821,15 @@ def collect_controller_support_file(output_dir):
         'success': False,
         'file_path': None,
         'size': 0,
-        'error': None
+        'error': None,
+        'elapsed_time': 0
     }
     
+    start_time = time.time()
+    start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    
     try:
-        print("\n[CONTROLLER] Generating network support file...")
+        print(f"\n[CONTROLLER] [{start_timestamp}] Generating network support file...")
         
         # Trigger support file generation
         endpoint = f'/api/s/{UNIFI_SITE_ID}/cmd/system'
@@ -825,6 +841,7 @@ def collect_controller_support_file(output_dir):
         except Exception as e:
             result['error'] = f"Failed to initiate support file generation: {e}"
             print(f"[CONTROLLER] ✗ Failed to initiate generation: {e}")
+            result['elapsed_time'] = time.time() - start_time
             return result
         
         # Wait a moment for file generation to start
@@ -832,53 +849,89 @@ def collect_controller_support_file(output_dir):
         time.sleep(5)  # Increased wait time for large support files
         
         # Try downloading from common support file endpoints
+        # Use streaming download to avoid loading entire file into memory
         download_urls = [
             f'/api/s/{UNIFI_SITE_ID}/dl/support',
             '/dl/support',
             f'/api/s/{UNIFI_SITE_ID}/dl/support.tar.gz',
         ]
         
-        downloaded_data = None
-        for url in download_urls:
-            try:
-                print(f"[CONTROLLER] Trying download URL: {url}")
-                sys.stdout.flush()
-                downloaded_data = unifi_utils.make_unifi_api_call('GET', url, return_raw=True)
-                print(f"[CONTROLLER] ✓ Downloaded support file ({len(downloaded_data)} bytes)")
-                sys.stdout.flush()
-                break
-            except Exception as e:
-                print(f"[CONTROLLER]   Failed: {e}")
-                sys.stdout.flush()
-                continue
-        
-        if not downloaded_data:
-            result['error'] = "Could not download support file from any known endpoint"
-            print(f"[CONTROLLER] ✗ {result['error']}")
-            return result
-        
         # Save to file with timestamp
         timestamp = time.strftime('%Y%m%d-%H%M%S')
         filename = f"controller_support_{timestamp}.tar.gz"
         file_path = output_dir / filename
         
-        print(f"[CONTROLLER] Writing {len(downloaded_data)/(1024*1024):.1f} MB to {filename}...")
-        sys.stdout.flush()
+        download_success = False
+        total_bytes = 0
         
-        with open(file_path, 'wb') as f:
-            f.write(downloaded_data)
+        for url in download_urls:
+            try:
+                print(f"[CONTROLLER] Trying download URL: {url}")
+                sys.stdout.flush()
+                
+                # Time the download
+                download_start = time.time()
+                
+                # Stream download directly to file (don't load into memory)
+                response = unifi_utils.make_unifi_api_call('GET', url, stream=True)
+                
+                # Read and write in 1MB chunks for efficiency
+                chunk_size = 1024 * 1024  # 1MB chunks
+                with open(file_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        total_bytes += len(chunk)
+                
+                response.close()
+                
+                download_time = time.time() - download_start
+                speed_mbps = (total_bytes / (1024 * 1024)) / download_time if download_time > 0 else 0
+                
+                print(f"[CONTROLLER] ✓ Downloaded support file ({total_bytes} bytes) in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
+                sys.stdout.flush()
+                
+                download_success = True
+                break
+            except Exception as e:
+                print(f"[CONTROLLER]   Failed: {e}")
+                sys.stdout.flush()
+                # Clean up partial file on error
+                if file_path.exists():
+                    file_path.unlink()
+                continue
+        
+        if not download_success:
+            result['error'] = "Could not download support file from any known endpoint"
+            print(f"[CONTROLLER] ✗ {result['error']}")
+            result['elapsed_time'] = time.time() - start_time
+            return result
         
         result['success'] = True
         result['file_path'] = str(file_path)
-        result['size'] = len(downloaded_data)
+        result['size'] = total_bytes
+        result['elapsed_time'] = time.time() - start_time
         
-        size_mb = len(downloaded_data) / (1024 * 1024)
+        size_mb = total_bytes / (1024 * 1024)
         print(f"[CONTROLLER] ✓ Saved to {filename} ({size_mb:.1f} MB)")
         sys.stdout.flush()
         
     except Exception as e:
         result['error'] = f"Unexpected error: {e}"
         print(f"[CONTROLLER] ✗ Error: {e}")
+    
+    # Ensure elapsed_time is always set
+    if result['elapsed_time'] == 0:
+        result['elapsed_time'] = time.time() - start_time
+    
+    # Print completion timestamp
+    completion_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    if result['success']:
+        print(f"[CONTROLLER] [{completion_timestamp}] ✓ Completed in {result['elapsed_time']:.1f}s")
+    else:
+        print(f"[CONTROLLER] [{completion_timestamp}] ✗ Failed after {result['elapsed_time']:.1f}s")
     
     return result
 
@@ -950,8 +1003,8 @@ Certificate Trust:
         "--output",
         "-o",
         type=Path,
-        default=Path("ap-logs"),
-        help="Output directory for collected logs (default: ap-logs/)"
+        default=Path.home() / "ap-logs",
+        help="Output directory for collected logs (default: ~/ap-logs/)"
     )
     
     parser.add_argument(
@@ -997,14 +1050,14 @@ Certificate Trust:
         "-p",
         type=int,
         metavar="N",
-        default=5,
-        help="Collect from N APs in parallel (default: 5, use 0 for unlimited)"
+        default=0,
+        help="Collect from N APs in parallel (default: 0 = unlimited, all APs at once)"
     )
     
     args = parser.parse_args()
     
     # Print version for debugging
-    print("unifi_collect_ap_logs - Version: 2025-02-09-v18")
+    print("unifi_collect_ap_logs - Version: 2025-02-10-v20")
     print()
     
     # Handle config errors
@@ -1110,10 +1163,15 @@ Certificate Trust:
             return 0
         
         print(f"Collecting logs from {len(filtered_aps)} AP(s)...")
-        print(f"Output directory: {args.output.absolute()}")
         
         # Create output directory
         args.output.mkdir(parents=True, exist_ok=True)
+        print(f"Output directory: {args.output.absolute()}")
+        
+        # Create unique collection subdirectory
+        timestamp = time.strftime('%Y%m%d-%H%M%S')
+        collection_dir = args.output / f"collection_{timestamp}"
+        collection_dir.mkdir(parents=True, exist_ok=True)
         
         # Collect logs from each AP
         results = []
@@ -1153,44 +1211,33 @@ Certificate Trust:
                 ap_mac=ap_mac,
                 ssh_username=ssh_username,
                 ssh_password=ssh_password,
-                output_dir=args.output,
+                output_dir=collection_dir,
                 timeout=args.timeout
             )
             
             return result
         
-        if args.parallel:
-            # Parallel collection
-            max_workers = args.parallel if args.parallel > 0 else len(filtered_aps)
-            with print_lock:
-                print(f"Using parallel collection with {max_workers} worker(s)\n")
+        # Parallel collection
+        max_workers = args.parallel if args.parallel > 0 else len(filtered_aps)
+        print(f"Using parallel collection with {max_workers} worker(s)\n")
+        
+        # Create AP info tuples with index
+        ap_infos = [(i, len(filtered_aps), ap) for i, ap in enumerate(filtered_aps, 1)]
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit controller support file collection task
+            controller_future = executor.submit(collect_controller_support_file, collection_dir)
             
-            # Create AP info tuples with index
-            ap_infos = [(i, len(filtered_aps), ap) for i, ap in enumerate(filtered_aps, 1)]
+            # Submit all AP tasks
+            future_to_ap = {executor.submit(collect_with_info, ap_info): ap_info for ap_info in ap_infos}
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit controller support file collection task
-                controller_future = executor.submit(collect_controller_support_file, args.output)
-                
-                # Submit all AP tasks
-                future_to_ap = {executor.submit(collect_with_info, ap_info): ap_info for ap_info in ap_infos}
-                
-                # Collect results as they complete
-                for future in as_completed(future_to_ap):
-                    result = future.result()
-                    results.append(result)
-                
-                # Wait for controller support file collection
-                controller_result = controller_future.result()
-        else:
-            # Sequential collection
-            # Collect controller support file first
-            controller_result = collect_controller_support_file(args.output)
-            
-            # Then collect from APs
-            for i, ap in enumerate(filtered_aps, 1):
-                result = collect_with_info((i, len(filtered_aps), ap))
+            # Collect results as they complete
+            for future in as_completed(future_to_ap):
+                result = future.result()
                 results.append(result)
+            
+            # Wait for controller support file collection
+            controller_result = controller_future.result()
         
         # Print summary
         print(f"\n{'='*60}")
@@ -1231,10 +1278,11 @@ Certificate Trust:
             ap_size = sum(f['size'] for f in r.get('files', []))
             ap_name = r['ap_name']
             ap_mac = r.get('ap_mac', 'unknown')
+            elapsed = r.get('elapsed_time', 0)
             # Format directory name the same way as it's created
             safe_ap_name = ap_name.replace('/', '_').replace(' ', '_')
             dir_name = f"{safe_ap_name}_{ap_mac.replace(':', '-')}"
-            print(f"  • {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB)")
+            print(f"  • {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB), {elapsed:.1f}s")
         
         if failed:
             print(f"\nFailed APs:")
@@ -1244,18 +1292,19 @@ Certificate Trust:
         # Show controller support file status
         if controller_result['success']:
             ctrl_size = controller_result['size']
+            ctrl_elapsed = controller_result.get('elapsed_time', 0)
             if ctrl_size > 1024*1024:
                 size_display = f"{ctrl_size/1024/1024:.1f} MB"
             elif ctrl_size > 1024:
                 size_display = f"{ctrl_size/1024:.1f} KB"
             else:
                 size_display = f"{ctrl_size} bytes"
-            print(f"\nController support file: {Path(controller_result['file_path']).name} ({size_display})")
+            print(f"\nController support file: {Path(controller_result['file_path']).name} ({size_display}, {ctrl_elapsed:.1f}s)")
         else:
             print(f"\n⚠ Controller support file collection failed: {controller_result.get('error', 'Unknown error')}")
         
         # Save summary to JSON
-        summary_file = args.output / "collection_summary.json"
+        summary_file = collection_dir / "collection_summary.json"
         summary_data = {
             'timestamp': datetime.now().isoformat(),
             'total_aps': len(results),
@@ -1271,6 +1320,33 @@ Certificate Trust:
             json.dump(summary_data, f, indent=2)
         
         print(f"\n✓ Summary saved to: {summary_file}")
+        
+        # Create tarball of all collected files in output directory
+        print(f"\nCreating tarball...")
+        tarball_name = f"ap-log-{timestamp}.tgz"
+        tarball_path = args.output / tarball_name
+        
+        import tarfile
+        import shutil
+        try:
+            with tarfile.open(tarball_path, 'w:gz') as tar:
+                tar.add(collection_dir, arcname=collection_dir.name)
+            
+            tarball_size = tarball_path.stat().st_size
+            if tarball_size > 1024*1024:
+                size_display = f"{tarball_size/1024/1024:.1f} MB"
+            elif tarball_size > 1024:
+                size_display = f"{tarball_size/1024:.1f} KB"
+            else:
+                size_display = f"{tarball_size} bytes"
+            
+            print(f"✓ Created {tarball_path} ({size_display})")
+            
+            # Delete collection directory after successful tarball creation
+            shutil.rmtree(collection_dir)
+            print(f"✓ Cleaned up collection directory")
+        except Exception as e:
+            print(f"⚠ Failed to create tarball: {e}")
         
         return 0 if len(failed) == 0 else 1
         

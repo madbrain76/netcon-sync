@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Parallel Collection**: Collect from multiple APs simultaneously (default: 5 workers)
+- **Parallel Collection**: Collect from multiple APs simultaneously (default: unlimited - all APs at once)
 - **Automatic SSH Credential Retrieval**: Gets SSH credentials from the UniFi controller
 - **Mass Log Collection**: Collects logs from all APs automatically
 - **Official Support Bundles**: Uses `supp` command for comprehensive diagnostics
@@ -53,10 +53,10 @@ SSH credentials are automatically retrieved from the controller's management set
 ### Basic Usage
 
 ```bash
-# Collect logs from all APs (default: 5 parallel workers)
+# Collect logs from all APs (default: unlimited parallelism - all APs at once)
 ./unifi_collect_ap_logs.py
 
-# Logs are saved to ./ap-logs/ by default
+# Logs are saved to ~/ap-logs/ by default
 ```
 
 ### Parallel Collection
@@ -64,14 +64,11 @@ SSH credentials are automatically retrieved from the controller's management set
 The tool collects logs from multiple APs simultaneously for faster processing:
 
 ```bash
-# Use default parallel collection (5 workers)
+# Use default unlimited parallel collection (all APs at once)
 ./unifi_collect_ap_logs.py
 
-# Collect from 10 APs in parallel
-./unifi_collect_ap_logs.py --parallel 10
-
-# Use maximum parallelism (all APs at once)
-./unifi_collect_ap_logs.py --parallel 0
+# Limit to 5 APs in parallel
+./unifi_collect_ap_logs.py --parallel 5
 
 # Disable parallel collection (sequential, slower but more controlled)
 ./unifi_collect_ap_logs.py --parallel 1
@@ -79,8 +76,8 @@ The tool collects logs from multiple APs simultaneously for faster processing:
 
 **Performance**:
 - **Sequential** (--parallel 1): ~45 seconds per AP (10 APs = ~7.5 minutes)
-- **Parallel** (--parallel 5): ~45 seconds total for 5 APs at a time (10 APs = ~1.5 minutes)
-- **Maximum** (--parallel 0): ~45 seconds total for all APs (10 APs = ~45 seconds)
+- **Unlimited** (default or --parallel 0): ~47 seconds total for all APs (10 APs = ~47 seconds)
+- **Limited** (--parallel 5): ~47 seconds per batch (10 APs = ~94 seconds)
 
 **Note**: The `supp` command on each AP takes 40-50 seconds to generate comprehensive diagnostics, so parallel collection provides significant time savings when collecting from multiple APs.
 
