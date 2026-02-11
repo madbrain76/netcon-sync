@@ -105,13 +105,12 @@ Trust a server certificate:
 ```
 .
 ├── pfsense2unifi.py           # Sync DHCP mappings from pfSense to UniFi
-├── unifi_climgr.py            # UniFi client and AP management CLI
-├── unifi_collect_ap_logs.py   # Collect logs from all APs via SSH/SCP
+├── unifi_climgr.py            # UniFi client and AP management CLI (includes AP log collection)
 ├── pfsense_dhcp.py            # pfSense DHCP backup and restore
 ├── pfsense2smokeping.py       # Generate Smokeping configuration from pfSense
 ├── pfsense_utils.py           # pfSense API utilities
 ├── unifi_utils.py             # UniFi API utilities
-├── unifi_network_manager.py   # Comprehensive network management CLI
+├── ap_log_collector.py        # Shared AP log collection module
 ├── config.py                  # Configuration management
 ├── trust.py                   # Certificate handling
 ├── http_tls_nss.py            # NSS/NSPR HTTP client
@@ -120,7 +119,6 @@ Trust a server certificate:
 ├── README.md                  # This file (overview)
 ├── pfsense2unifi.md           # pfsense2unifi.py documentation
 ├── unifi_climgr.md            # unifi_climgr.py documentation
-├── unifi_collect_ap_logs.md   # unifi_collect_ap_logs.py documentation
 └── LICENSE                    # GPL-3.0 license
 ```
 
