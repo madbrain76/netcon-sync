@@ -28,6 +28,8 @@ if os.path.exists(_VENV_PATH):
 import argparse
 import json
 import time
+import tarfile
+import shutil
 from datetime import datetime, timedelta
 from collections import defaultdict
 from pathlib import Path
@@ -2583,6 +2585,78 @@ EXAMPLES:
     disable_parser.add_argument('--filter_name', type=str, help='Disable SSIDs/APs matching this name (substring match)')
     disable_parser.add_argument('--filter_mac', type=str, help='Disable AP by MAC address (substring match, APs only)')
 
+    # ============================================================================
+    # COLLECT-AP-LOGS action
+    # ============================================================================
+    collect_logs_parser = subparsers.add_parser(
+        'collect-ap-logs',
+        help='Collect diagnostic logs from Access Points via SSH',
+        allow_abbrev=False,
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+EXAMPLES:
+  # Collect logs from all APs (default: unlimited parallelism)
+  ./unifi_climgr.py collect-ap-logs
+  
+  # Collect logs with limited parallelism
+  ./unifi_climgr.py collect-ap-logs --parallel 5
+  
+  # Collect logs to specific directory
+  ./unifi_climgr.py collect-ap-logs --output /tmp/ap-logs
+  
+  # Collect only from specific APs
+  ./unifi_climgr.py collect-ap-logs --filter-name "Office"
+  ./unifi_climgr.py collect-ap-logs --filter-ip "192.168.1"
+  
+  # Skip controller support file collection
+  ./unifi_climgr.py collect-ap-logs --no-controller
+        """
+    )
+    collect_logs_parser.add_argument(
+        '--output', '-o',
+        type=Path,
+        default=Path.home() / 'ap-logs',
+        help='Output directory for log files (default: ~/ap-logs)'
+    )
+    collect_logs_parser.add_argument(
+        '--parallel', '-p',
+        type=int,
+        default=0,
+        metavar='N',
+        help='Collect from N APs in parallel (default: 0 = unlimited)'
+    )
+    collect_logs_parser.add_argument(
+        '--timeout',
+        type=int,
+        default=60,
+        help='SSH connection timeout in seconds (default: 60)'
+    )
+    collect_logs_parser.add_argument(
+        '--no-controller',
+        action='store_true',
+        help='Skip controller support file collection'
+    )
+    collect_logs_parser.add_argument(
+        '--filter-name',
+        type=str,
+        help='Filter APs by name (substring match)'
+    )
+    collect_logs_parser.add_argument(
+        '--filter-ip',
+        type=str,
+        help='Filter APs by IP address (substring match)'
+    )
+    collect_logs_parser.add_argument(
+        '--filter-mac',
+        type=str,
+        help='Filter APs by MAC address (substring match)'
+    )
+    collect_logs_parser.add_argument(
+        '--online-only',
+        action='store_true',
+        help='Collect only from online APs'
+    )
+
     # Parse arguments
     args = parser.parse_args(argparse_args)
     
@@ -4120,6 +4194,174 @@ EXAMPLES:
                 if mac:
                     results[mac.lower()] = unifi_utils.unblock_client(mac)
             print_action_results_table(filtered_clients, "unblock", results)
+        
+        elif args.action == 'collect-ap-logs':
+            # Import the AP log collector module
+            import ap_log_collector
+            
+            print("unifi_climgr - AP Log Collection\n")
+            
+            # Login to controller
+            print("Logging into UniFi controller...")
+            unifi_utils.login()
+            print("[OK] Login successful\n")
+            
+            # Get SSH credentials from controller
+            print("Retrieving SSH credentials from controller...")
+            ssh_username, ssh_password = ap_log_collector.get_ssh_credentials()
+            
+            if not ssh_username or not ssh_password:
+                print("ERROR: Could not retrieve SSH credentials from controller.")
+                print("Please ensure SSH is configured in UniFi Settings > System > Advanced.")
+                sys.exit(1)
+            
+            # Fetch APs from controller
+            print("Fetching UniFi devices...")
+            devices = unifi_utils.make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
+            
+            if isinstance(devices, dict) and 'data' in devices:
+                devices = devices['data']
+            
+            # Filter for Access Points only
+            aps = [d for d in devices if d.get('type') == 'uap']
+            
+            if not aps:
+                print("No Access Points found.")
+                sys.exit(0)
+            
+            print(f"Found {len(aps)} Access Point(s)")
+            
+            # Apply filters
+            filtered_aps = aps
+            
+            if args.filter_name:
+                filtered_aps = [ap for ap in filtered_aps if args.filter_name.lower() in ap.get('name', '').lower()]
+            
+            if args.filter_ip:
+                filtered_aps = [ap for ap in filtered_aps if args.filter_ip in ap.get('ip', '')]
+            
+            if args.filter_mac:
+                filter_mac_clean = args.filter_mac.replace(':', '').replace('-', '').lower()
+                filtered_aps = [ap for ap in filtered_aps 
+                               if filter_mac_clean in ap.get('mac', '').replace(':', '').lower()]
+            
+            if args.online_only:
+                filtered_aps = [ap for ap in filtered_aps if ap.get('state') == 1]
+            
+            if not filtered_aps:
+                print("No Access Points match the specified filters.")
+                sys.exit(0)
+            
+            print(f"Collecting logs from {len(filtered_aps)} AP(s)...\n")
+            
+            # Collect logs
+            ap_results, controller_result, collection_info = ap_log_collector.collect_all_ap_logs(
+                output_dir=args.output,
+                aps=filtered_aps,
+                ssh_username=ssh_username,
+                ssh_password=ssh_password,
+                parallel=args.parallel,
+                timeout=args.timeout,
+                include_controller=not args.no_controller
+            )
+            
+            # Print summary
+            successful = [r for r in ap_results if r['success']]
+            failed = [r for r in ap_results if not r['success']]
+            
+            total_files = sum(len(r.get('files', [])) for r in successful)
+            total_size = sum(sum(f['size'] for f in r.get('files', [])) for r in successful)
+            
+            print(f"\n{'='*60}")
+            print(f"COLLECTION SUMMARY")
+            print(f"{'='*60}")
+            print(f"Collection start: {collection_info['start_timestamp']}")
+            print(f"Collection end:   {collection_info['end_timestamp']}")
+            print(f"Total collection time: {collection_info['elapsed_time']:.1f}s")
+            print(f"\nTotal APs processed: {len(ap_results)}")
+            print(f"  [OK] Successful: {len(successful)}")
+            print(f"  [FAIL] Failed: {len(failed)}")
+            print(f"\nTotal files collected: {total_files}")
+            print(f"Total size: {total_size:,} bytes ({total_size / 1024 / 1024:.2f} MB)")
+            
+            if total_files > 0:
+                avg_size = total_size / total_files
+                print(f"Average file size: {avg_size:,.0f} bytes ({avg_size / 1024:.1f} KB)")
+            
+            print(f"\nPer-AP breakdown:")
+            for r in successful:
+                num_files = len(r.get('files', []))
+                ap_size = sum(f['size'] for f in r.get('files', []))
+                ap_name = r['ap_name']
+                ap_mac = r.get('ap_mac', 'unknown')
+                elapsed = r.get('elapsed_time', 0)
+                start_ts = r.get('start_timestamp', 'N/A')
+                end_ts = r.get('end_timestamp', 'N/A')
+                safe_ap_name = ap_name.replace('/', '_').replace(' ', '_')
+                dir_name = f"{safe_ap_name}_{ap_mac.replace(':', '-')}"
+                print(f"  - {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB), {elapsed:.1f}s")
+                print(f"    Start: {start_ts}  End: {end_ts}")
+            
+            if failed:
+                print(f"\nFailed APs:")
+                for r in failed:
+                    print(f"  - {r['ap_name']} ({r['ap_ip']}): {r.get('error', 'Unknown error')}")
+            
+            if controller_result and controller_result['success']:
+                ctrl_size = controller_result['size']
+                ctrl_elapsed = controller_result.get('elapsed_time', 0)
+                ctrl_start = controller_result.get('start_timestamp', 'N/A')
+                ctrl_end = controller_result.get('end_timestamp', 'N/A')
+                size_display = f"{ctrl_size/1024/1024:.1f} MB" if ctrl_size > 1024*1024 else f"{ctrl_size/1024:.1f} KB"
+                print(f"\nController support file: {Path(controller_result['file_path']).name} ({size_display}, {ctrl_elapsed:.1f}s)")
+                print(f"  Start: {ctrl_start}  End: {ctrl_end}")
+            elif controller_result:
+                print(f"\nWARNING: Controller support file collection failed: {controller_result.get('error', 'Unknown error')}")
+            
+            # Save summary to JSON
+            collection_dir = collection_info['collection_dir']
+            summary_file = collection_dir / "collection_summary.json"
+            summary_data = {
+                'timestamp': collection_info['start_timestamp'],
+                'total_aps': len(ap_results),
+                'successful': len(successful),
+                'failed': len(failed),
+                'total_files': total_files,
+                'total_size_bytes': total_size,
+                'controller_support_file': controller_result,
+                'results': ap_results
+            }
+            
+            with open(summary_file, 'w') as f:
+                json.dump(summary_data, f, indent=2)
+            
+            print(f"\n[OK] Summary saved to: {summary_file}")
+            
+            # Create tarball
+            print(f"\nCreating tarball...")
+            tarball_start_time = time.time()
+            tarball_name = f"ap-log-{collection_info['timestamp']}.tgz"
+            tarball_path = args.output / tarball_name
+            
+            try:
+                with tarfile.open(tarball_path, 'w:gz') as tar:
+                    tar.add(collection_dir, arcname=collection_dir.name)
+                
+                tarball_size = tarball_path.stat().st_size
+                size_display = f"{tarball_size/1024/1024:.1f} MB" if tarball_size > 1024*1024 else f"{tarball_size/1024:.1f} KB"
+                
+                print(f"[OK] Created {tarball_path} ({size_display})")
+                
+                # Clean up collection directory
+                shutil.rmtree(collection_dir)
+                print(f"[OK] Cleaned up collection directory")
+                
+                tarball_elapsed = time.time() - tarball_start_time
+                print(f"\nTarball creation took {tarball_elapsed:.1f}s")
+            except Exception as e:
+                print(f"WARNING: Failed to create tarball: {e}")
+            
+            sys.exit(0 if len(failed) == 0 else 1)
 
     except nss.error.NSPRError as e:
         # Certificate validation error - provide helpful guidance
