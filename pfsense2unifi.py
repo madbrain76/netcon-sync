@@ -92,28 +92,28 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
     """
     Detects clients in UniFi that were not updated by the sync process.
     Optionally deletes them if delete_orphans flag is set.
-    
+
     Args:
         synced_macs (set): Set of MAC addresses that were synced from pfSense
         delete_orphans (bool): If True, delete orphaned clients; if False, just report them
-    
+
     Returns:
         dict: Results of orphan detection/deletion
     """
     from unifi_utils import get_unifi_clients_fast
-    
+
     orphan_results = {
         "found": [],
         "deleted": [],
         "failed_to_delete": []
     }
-    
+
     print("\nChecking for orphaned clients in UniFi...")
     unifi_clients_by_mac = get_unifi_clients_fast()
-    
+
     # Normalize synced MACs to lowercase for comparison
     synced_macs_lower = {mac.lower() for mac in synced_macs}
-    
+
     # Find clients in UniFi that aren't in our synced list
     for mac, client in unifi_clients_by_mac.items():
         if mac not in synced_macs_lower:
@@ -124,35 +124,35 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
                 "hostname": client.get("hostname"),
                 "note": client.get("note")
             })
-    
+
     if not orphan_results["found"]:
         print("No orphaned clients found.")
         return orphan_results
-    
+
     print(f"Found {len(orphan_results['found'])} orphaned clients in UniFi:")
     for client in orphan_results["found"]:
         print(f"  - {client['mac']}: {client['name']}")
-    
+
     if delete_orphans:
         print("\nDeleting orphaned clients (batch operation)...")
         orphan_macs = [client["mac"] for client in orphan_results["found"]]
-        
+
         # Use batch forget for efficiency (single API call instead of one per client)
         batch_result = forget_clients_batch(orphan_macs)
-        
+
         if batch_result["success"]:
             orphan_results["deleted"] = orphan_results["found"]
             print(f"  [OK] Deleted {batch_result['sent']} orphaned clients in single API call")
         else:
             orphan_results["failed_to_delete"] = orphan_results["found"]
             print(f"  [FAIL] Failed to delete orphaned clients")
-        
+
         print(f"\nDeleted {len(orphan_results['deleted'])}/{len(orphan_results['found'])} orphaned clients")
         if orphan_results["failed_to_delete"]:
             print(f"WARNING: Failed to delete {len(orphan_results['failed_to_delete'])} clients")
     else:
         print("\nUse --delete-orphans flag to delete these orphaned clients.")
-    
+
     return orphan_results
 
 
@@ -161,27 +161,27 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
     Fetches DHCP static mappings from pfSense (filtered by description ending in suffix),
     strips the suffix, and attempts to add/update them as known clients in UniFi with
     their modified descriptions as names and pfSense hostname as notes.
-    
+
     Optimized to fetch client list ONCE and send API calls directly,
     avoiding repeated full-list fetches per client.
-    
+
     Args:
         delete_orphans (bool): Whether to delete orphaned clients
         suffix (str): Description suffix to filter by (defaults to " - Wifi")
     """
-    
+
     print("WARNING: Please backup your UniFi configuration before migration!")
     print("   Use UniFi's built-in backup feature in System Settings > Backup & Restore")
     print()
-    
+
     from unifi_utils import make_unifi_api_call, build_client_payload, get_unifi_clients_fast
     import time
-    
+
     # Use provided suffix or default to " - Wifi"
     # Special case: "NONE" means no filtering (sync all clients)
     client_suffix = suffix if suffix else " - Wifi"
     no_suffix_filter = (client_suffix == "NONE")
-    
+
     # Track results
     results = {
         "created": [],
@@ -190,10 +190,10 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         "filtered_out": [],
         "invalid_mac": []
     }
-    
+
     # Track synced MACs for orphan detection
     synced_macs = set()
-    
+
     try:
         # STEP 1: Fetch DHCP static mappings from pfSense FIRST
         print("Fetching DHCP static mappings from pfSense...")
@@ -242,7 +242,7 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
 
             # Strip trailing/leading whitespace from description for matching
             descr_stripped = descr.strip() if descr else ""
-            
+
             # Apply filtering (skip if no_suffix_filter is True)
             if not no_suffix_filter:
                 if not descr_stripped or not descr_stripped.endswith(client_suffix):
@@ -276,21 +276,21 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                         print(f"  [{i}/{len(pfsense_mappings)}] [FAIL] {mac}: No _id found")
                         results["failed"].append({"mac": mac, "name": unifi_client_name, "note": unifi_note})
                         continue
-                    
+
                     # Extract old values from existing client
                     old_name = existing_client.get("name") or ""
                     old_note = existing_client.get("note") or ""
-                    
+
                     # Determine new values
                     new_name = unifi_client_name
                     new_note = unifi_note or ""
-                    
+
                     # Check if anything actually changed
                     fields_changed = (
                         old_name != new_name or
                         old_note != new_note
                     )
-                    
+
                     if fields_changed:
                         # Only send API call if something actually changed
                         prep_start = time.time()
@@ -299,12 +299,12 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                         payload["display_name"] = unifi_client_name
                         payload["note"] = new_note  # Always set note (even if empty)
                         prep_time = time.time() - prep_start
-                        
+
                         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
                         api_start = time.time()
                         make_unifi_api_call("PUT", endpoint, json=payload)
                         api_time = time.time() - api_start
-                        
+
                         results["updated"].append({
                             "mac": mac,
                             "old_name": old_name,
@@ -331,24 +331,24 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                     }
                     # Remove empty strings
                     payload = {k: v for k, v in payload.items() if v != ""}
-                    
+
                     endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user"
                     api_start = time.time()
                     make_unifi_api_call("POST", endpoint, json=payload)
                     api_time = time.time() - api_start
-                    
+
                     results["created"].append({
                         "mac": mac,
                         "name": unifi_client_name,
                         "note": unifi_note or ""
                     })
-                
+
                 synced_macs.add(normalized_mac)
                 loop_time = time.time() - loop_start
                 debug_str = f" (api:{api_time:.2f}s total:{loop_time:.2f}s)" if loop_time > 0.2 else ""
                 print(f"  [{i}/{len(pfsense_mappings)}] [OK] {mac}: {unifi_client_name}{debug_str}")
                 sys.stdout.flush()  # Real-time display
-                
+
             except Exception as e:
                 results["failed"].append({
                     "mac": mac,
@@ -368,19 +368,19 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
             unifi_macs_final = set(unifi_clients_final.keys())
             verified_count = 0
             unverified = []
-            
+
             for client_info in all_modified:
                 if client_info["mac"].lower() in unifi_macs_final:
                     verified_count += 1
                 else:
                     unverified.append(client_info)
-            
+
             if unverified:
                 results["failed"].extend(unverified)
                 # Remove unverified from created and updated
                 results["created"] = [c for c in results["created"] if c not in unverified]
                 results["updated"] = [c for c in results["updated"] if c not in unverified]
-            
+
             print(f"Verified {verified_count}/{len(all_modified)} clients in UniFi")
 
         # Print summary
@@ -397,13 +397,13 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         print(f"  - Clients successfully updated in UniFi (fields changed): {len(results['updated'])}")
         print(f"  - Clients failed to add/update: {len(results['failed'])}")
         print("="*70)
-        
+
         # Display created clients
         if results["created"]:
             print("\nADDED CLIENTS:")
             for client in results["created"]:
                 print(f"  {client['mac']} ({client['name']})... [OK]")
-        
+
         # Display updated clients (only those with changed fields)
         if results["updated"]:
             print("\nUPDATED CLIENTS (fields changed):")
@@ -416,25 +416,25 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                 if changes:
                     change_str = ", ".join(changes)
                     print(f"  {client['mac']} ({change_str})... [OK]")
-        
+
         if results["failed"]:
             print("\nFAILED CLIENTS:")
             for client in results["failed"]:
                 error_msg = client.get("error", "Unknown error")
                 print(f"  - {client['mac']}: {client['name']} - {error_msg}")
-        
+
         if results["invalid_mac"]:
             print("\nINVALID MAC ADDRESSES:")
             for client in results["invalid_mac"]:
                 print(f"  - {client['mac']}: {client['hostname']}")
-        
+
         # Handle orphaned clients
         if synced_macs:
             orphan_results = handle_orphaned_clients(synced_macs, delete_orphans)
             if orphan_results["failed_to_delete"]:
                 print("\nWARNING: Failed to delete some orphaned clients")
                 sys.exit(1)
-        
+
         if results["failed"] or results["invalid_mac"]:
             sys.exit(1)
 
@@ -499,7 +499,7 @@ EXAMPLES:
   %(prog)s trust --ca /path/to/ca_cert.pem
   %(prog)s trust --server https://pfsense.example.com"""
     )
-    
+
     # Global options (appear in main help)
     parser.add_argument(
         "--delete-orphans",
@@ -512,7 +512,7 @@ EXAMPLES:
         default=None,
         help="Client description suffix to filter by (for sync command only, default: ' - Wifi'). Use --suffix NONE to sync all clients without filtering"
     )
-    
+
     # Trust certificate options (appear in main help)
     trust_options_group = parser.add_mutually_exclusive_group()
     trust_options_group.add_argument(
@@ -525,9 +525,9 @@ EXAMPLES:
         metavar="URL",
         help="Connect to a server URL and trust its certificate (for trust command only, e.g., https://example.com:8443)"
     )
-    
+
     subparsers = parser.add_subparsers(dest="action", help="")
-    
+
     # Sync subcommand
     sync_parser = subparsers.add_parser(
         "sync",
@@ -544,7 +544,7 @@ EXAMPLES:
         default=None,
         help="Client description suffix to filter by (default: ' - Wifi'). Use --suffix NONE to sync all clients"
     )
-    
+
     # Trust subcommand
     trust_parser = subparsers.add_parser(
         "trust",
@@ -561,34 +561,34 @@ EXAMPLES:
         metavar="URL",
         help="Connect to a server URL and trust its certificate (e.g., https://example.com:8443)"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Check if UniFi config failed to load
     if _unifi_import_error:
         print(f"ERROR: Configuration Error: {_unifi_import_error}", file=sys.stderr)
         parser.print_help()
         sys.exit(1)
-    
+
     # Initialize NSS database at startup (before any HTTPS connections)
     import nss.nss as nss_core
-    
+
     nss_db_dir = Path.home() / ".netcon-sync"
-    
+
     # Create NSS database if it doesn't exist
     try:
         ensure_nss_db(nss_db_dir)
     except RuntimeError as e:
         print(f"Error initializing NSS database: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Initialize NSS
     try:
         nss_core.nss_init(str(nss_db_dir))
     except Exception as e:
         print(f"Error initializing NSS: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Show help if no action specified
     if not args.action:
         # If --ca or --server provided without command, auto-run trust
@@ -597,7 +597,7 @@ EXAMPLES:
         else:
             parser.print_help()
             sys.exit(0)
-    
+
     # Load pfSense config when needed
     if args.action == "sync":
         try:

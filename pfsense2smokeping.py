@@ -53,7 +53,7 @@ def create_smokeping_section(f_stream, section_name, title, mappings):
 
         # Sanitize hostname for subsection name (replace spaces with underscores)
         subsection_name = f"{hostname.replace(' ', '_')}"
-        
+
         f_stream.write(
             f"++ {subsection_name}\n"
             f"menu = {menu}\n"  # Use sanitized description/hostname for menu
@@ -132,14 +132,14 @@ def generate_smokeping_config(dhcp_static_mappings_list: list) -> str:
         "title = Internet Connections\n\n"
         "++ GoogleDNS\nmenu = Google DNS\ntitle = Google DNS\nhost = 8.8.8.8\n# MAC Address: Not applicable\n\n"
     )
-    
+
     return output_buffer.getvalue()
 
 
 if __name__ == "__main__":
     """
     Main entry point for SmokePing configuration generation.
-    
+
     Fetches DHCP static mappings from pfSense using pfsense_utils API and
     generates SmokePing configuration for network monitoring.
     """
@@ -147,26 +147,26 @@ if __name__ == "__main__":
     import nss.nss as nss_core
     from pathlib import Path
     from trust import ensure_nss_db
-    
+
     nss_db_dir = Path.home() / ".netcon-sync"
-    
+
     # Create NSS database if it doesn't exist
     try:
         ensure_nss_db(nss_db_dir)
     except RuntimeError as e:
         print(f"Error initializing NSS database: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Initialize NSS
     try:
         nss_core.nss_init(str(nss_db_dir))
     except Exception as e:
         print(f"Error initializing NSS: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     try:
         from pfsense_utils import get_pfsense_dhcp_static_mappings
-        
+
         # Fetch DHCP mappings from pfSense (uses 'lan' by default from config)
         dhcp_mappings = get_pfsense_dhcp_static_mappings()
     except ImportError:

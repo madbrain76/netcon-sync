@@ -138,7 +138,7 @@ print_lock = Lock()
 def get_ssh_credentials():
     """
     Retrieve SSH credentials from UniFi controller.
-    
+
     Returns:
         tuple: (username, password) or (None, None) if not found
     """
@@ -147,18 +147,18 @@ def get_ssh_credentials():
         settings = unifi_utils.make_unifi_api_call("GET", endpoint)
         if isinstance(settings, dict) and 'data' in settings:
             settings = settings['data']
-        
+
         if isinstance(settings, list) and len(settings) > 0:
             mgmt_settings = settings[0]
             username = mgmt_settings.get('x_ssh_username', 'ubnt')
             password = mgmt_settings.get('x_ssh_password', '')
-            
+
             if username and password:
                 print(f"[OK] Retrieved SSH credentials (username: {username})")
                 return username, password
     except Exception as e:
         print(f"Warning: Could not retrieve SSH credentials from settings: {e}")
-    
+
     # Fallback: try sysinfo endpoint
     endpoint = f"/api/s/{UNIFI_SITE_ID}/stat/sysinfo"
     try:
@@ -167,43 +167,43 @@ def get_ssh_credentials():
             sysinfo_data = sysinfo['data'][0] if isinstance(sysinfo['data'], list) else sysinfo['data']
             username = sysinfo_data.get('x_ssh_username', 'ubnt')
             password = sysinfo_data.get('x_ssh_password', '')
-            
+
             if username and password:
                 print(f"[OK] Retrieved SSH credentials from sysinfo (username: {username})")
                 return username, password
     except Exception as e:
         print(f"Warning: Could not retrieve SSH credentials from sysinfo: {e}")
-    
+
     return None, None
 
 
 def collect_ap_support_bundle(ssh_client, ap_name):
     """
     Generate support bundle on AP using 'supp' command.
-    
+
     Args:
         ssh_client: Active SSH client connection
         ap_name: AP name for logging
-    
+
     Returns:
         tuple: (success, bundle_path, size_str) or (False, None, None)
     """
     try:
         print(f"[{ap_name}] Generating support info bundle...")
         print(f"[{ap_name}]   Trying 'supp' command...")
-        
+
         start_time = time.time()
         stdin, stdout, stderr = ssh_client.exec_command('supp', timeout=120)
         output = stdout.read().decode('utf-8', errors='replace')
         stderr.read()  # Consume stderr
         elapsed = time.time() - start_time
-        
+
         print(f"[{ap_name}]   supp command took {elapsed:.1f} seconds")
-        
+
         # Check if file exists
         stdin, stdout, stderr = ssh_client.exec_command('ls -lh /tmp/support.tgz')
         ls_stdout = stdout.read().decode('utf-8')
-        
+
         if 'support.tgz' in ls_stdout:
             size_match = re.search(r'(\d+(?:\.\d+)?[KMG]?)\s+\w+\s+\d+\s+[\d:]+\s+/tmp/support\.tgz', ls_stdout)
             size_str = size_match.group(1) if size_match else 'unknown size'
@@ -212,7 +212,7 @@ def collect_ap_support_bundle(ssh_client, ap_name):
         else:
             print(f"[{ap_name}]   supp: file not found after command completed")
             return False, None, None
-            
+
     except Exception as e:
         print(f"[{ap_name}]   supp command failed: {e}")
         return False, None, None
@@ -221,7 +221,7 @@ def collect_ap_support_bundle(ssh_client, ap_name):
 def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, output_dir, timeout=60):
     """
     Collect diagnostic logs from a single AP via SSH/SCP.
-    
+
     Args:
         ap_ip: AP IP address
         ap_name: AP display name
@@ -230,7 +230,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
         ssh_password: SSH password
         output_dir: Local directory to save files
         timeout: SSH timeout in seconds
-    
+
     Returns:
         dict: Collection result with success status, files, errors, timing
     """
@@ -245,25 +245,25 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
         'start_timestamp': None,
         'end_timestamp': None
     }
-    
+
     ssh_client = None
     start_time = time.time()
     start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     result['start_timestamp'] = start_timestamp
-    
+
     # Create AP-specific directory
     safe_ap_name = ap_name.replace('/', '_').replace(' ', '_')
     ap_dir = output_dir / f"{safe_ap_name}_{ap_mac.replace(':', '-')}"
     ap_dir.mkdir(parents=True, exist_ok=True)
-    
+
     try:
         with print_lock:
             print(f"\n{'='*60}")
             print(f"[{ap_name}] [{start_timestamp}] Connecting to {ap_ip}...")
-        
+
         ssh_client = paramiko.SSHClient()
         ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        
+
         try:
             ssh_client.connect(
                 hostname=ap_ip,
@@ -299,34 +299,34 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
             with print_lock:
                 print(f"[{ap_name}] [FAIL] SSH connection error: {e}")
             return result
-        
+
         with print_lock:
             print(f"[{ap_name}] [OK] Connected")
-        
+
         # Generate support bundle
         success, bundle_path, size_str = collect_ap_support_bundle(ssh_client, ap_name)
-        
+
         if success and bundle_path:
             # Download via SCP
             local_path = ap_dir / Path(bundle_path).name
             with print_lock:
                 print(f"[{ap_name}]   Downloading {Path(bundle_path).name} ({size_str})...", end="", flush=True)
-            
+
             try:
                 with SCPClient(ssh_client.get_transport()) as scp:
                     scp.get(bundle_path, str(local_path))
-                
+
                 actual_size = local_path.stat().st_size
                 with print_lock:
                     print(f" [OK]")
-                
+
                 result['files'].append({
                     'remote_path': bundle_path,
                     'local_path': str(local_path),
                     'size': actual_size,
                     'type': 'support_bundle'
                 })
-                
+
                 # Clean up remote file
                 try:
                     stdin, stdout, stderr = ssh_client.exec_command(f'rm -f {bundle_path}')
@@ -336,39 +336,39 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
             except Exception as e:
                 with print_lock:
                     print(f" [FAIL]: {e}")
-        
+
         # Collect log files from /var/log/
         with print_lock:
             print(f"[{ap_name}] Collecting individual log files...")
-        
+
         stdin, stdout, stderr = ssh_client.exec_command(
             r'find /var/log -type f \( -name "*.log" -o -name "messages" -o -name "syslog" \) 2>/dev/null | head -20'
         )
         log_files = stdout.read().decode('utf-8').strip().split('\n')
         log_files = [f.strip() for f in log_files if f.strip()]
-        
+
         if log_files:
             with print_lock:
                 print(f"[{ap_name}] Found {len(log_files)} log file(s)")
-            
+
             for remote_path in log_files:
                 filename = Path(remote_path).name
                 local_path = ap_dir / filename
-                
+
                 if local_path.exists():
                     continue
-                
+
                 with print_lock:
                     print(f"[{ap_name}]   Downloading {filename}...", end="", flush=True)
-                
+
                 try:
                     with SCPClient(ssh_client.get_transport()) as scp:
                         scp.get(remote_path, str(local_path))
-                    
+
                     actual_size = local_path.stat().st_size
                     with print_lock:
                         print(f" [OK] ({actual_size:,} bytes)")
-                    
+
                     result['files'].append({
                         'remote_path': remote_path,
                         'local_path': str(local_path),
@@ -378,7 +378,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 except Exception as e:
                     with print_lock:
                         print(f" [FAIL]: {e}")
-        
+
         if result['files']:
             result['success'] = True
             with print_lock:
@@ -387,7 +387,7 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
             result['error'] = "No log files collected"
             with print_lock:
                 print(f"[{ap_name}] WARNING: No log files were collected")
-    
+
     except Exception as e:
         result['error'] = str(e)
         with print_lock:
@@ -398,27 +398,27 @@ def collect_logs_from_ap(ap_ip, ap_name, ap_mac, ssh_username, ssh_password, out
                 ssh_client.close()
             except:
                 pass
-        
+
         result['elapsed_time'] = time.time() - start_time
         completion_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         result['end_timestamp'] = completion_timestamp
-        
+
         with print_lock:
             if result['success']:
                 print(f"[{ap_name}] [{completion_timestamp}] [OK] Completed in {result['elapsed_time']:.1f}s")
             else:
                 print(f"[{ap_name}] [{completion_timestamp}] [FAIL] Failed after {result['elapsed_time']:.1f}s")
-    
+
     return result
 
 
 def collect_controller_support_file(output_dir):
     """
     Collect support file from UniFi controller.
-    
+
     Args:
         output_dir: Directory to save the support file
-    
+
     Returns:
         dict: Result with success status, file path, size, timing
     """
@@ -431,19 +431,24 @@ def collect_controller_support_file(output_dir):
         'start_timestamp': None,
         'end_timestamp': None
     }
-    
+
     start_time = time.time()
     start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     result['start_timestamp'] = start_timestamp
-    
+
     try:
         with print_lock:
             print(f"\n[CONTROLLER] [{start_timestamp}] Generating network support file...")
-        
+
         # Trigger support file generation
+        # UniFi Network 10.x changed the command format
         endpoint = f'/api/s/{UNIFI_SITE_ID}/cmd/system'
-        payload = {'cmd': 'gen-support-file'}
-        
+        payload = {
+            'cmd': 'support',
+            'userAgent': 'unifi-climgr/1.0',
+            'language': 'en-US'
+        }
+
         try:
             response = unifi_utils.make_unifi_api_call('POST', endpoint, json=payload)
             with print_lock:
@@ -457,7 +462,7 @@ def collect_controller_support_file(output_dir):
                 print(f"[CONTROLLER] [FAIL] Failed to initiate generation: {e}")
             result['elapsed_time'] = time.time() - start_time
             return result
-        
+
         # Get controller version for diagnostics
         try:
             status_endpoint = f'/api/s/{UNIFI_SITE_ID}/stat/sysinfo'
@@ -470,7 +475,7 @@ def collect_controller_support_file(output_dir):
         except Exception as e:
             with print_lock:
                 print(f"[CONTROLLER] Could not get version info: {e}")
-        
+
         # Download the support file - try multiple endpoints (controllers have different paths across versions)
         # After controller upgrades, generation may be synchronous, so try download immediately
         # Modern controllers (v8+) use /dl/support as primary endpoint
@@ -484,39 +489,39 @@ def collect_controller_support_file(output_dir):
             f'/api/download/support',                    # Alternative API path
             f'/dl/autobackup/support.tar.gz',            # Autobackup path (some versions)
         ]
-        
+
         timestamp = time.strftime('%Y%m%d-%H%M%S')
         filename = f"controller_support_{timestamp}.tar.gz"
         file_path = output_dir / filename
-        
+
         download_success = False
         total_bytes = 0
-        
+
         # Try each endpoint with brief retries in case generation needs a moment
         # Modern controllers generate synchronously, so usually works on first try
         max_retries = 2
         retry_delay = 3  # Wait 3 seconds between retries if needed
-        
+
         for retry in range(max_retries):
             if download_success:
                 break
-                
+
             if retry > 0:
                 with print_lock:
                     print(f"[CONTROLLER] Retry {retry}/{max_retries-1} after {retry_delay}s delay...")
                 time.sleep(retry_delay)
-            
+
             for url in download_urls:
                 try:
                     with print_lock:
                         print(f"[CONTROLLER] Trying download URL: {url}")
                         sys.stdout.flush()
-                    
+
                     download_start = time.time()
                     total_bytes = 0  # Reset for this attempt
-                    
+
                     response = unifi_utils.make_unifi_api_call('GET', url, stream=True)
-                    
+
                     chunk_size = 1024 * 1024  # 1MB chunks
                     with open(file_path, 'wb') as f:
                         while True:
@@ -525,20 +530,20 @@ def collect_controller_support_file(output_dir):
                                 break
                             f.write(chunk)
                             total_bytes += len(chunk)
-                    
+
                     response.close()
-                    
+
                     # Validate downloaded file (support files should be at least 100KB)
                     if total_bytes < 102400:
                         raise Exception(f"Downloaded file too small ({total_bytes} bytes), likely not a valid support file")
-                    
+
                     download_time = time.time() - download_start
                     speed_mbps = (total_bytes / (1024 * 1024)) / download_time if download_time > 0 else 0
-                    
+
                     with print_lock:
                         print(f"[CONTROLLER] [OK] Downloaded support file ({total_bytes} bytes) in {download_time:.1f}s ({speed_mbps:.1f} MB/s)")
                         sys.stdout.flush()
-                    
+
                     download_success = True
                     break
                 except Exception as e:
@@ -549,7 +554,7 @@ def collect_controller_support_file(output_dir):
                     if file_path.exists():
                         file_path.unlink()
                     continue
-        
+
         if not download_success:
             attempted_urls = '\n    '.join(download_urls)
             result['error'] = f"Could not download support file from any known endpoint.\nAttempted URLs:\n    {attempted_urls}\n\nYou can manually download the support file from:\nSettings > System > Maintenance > Download Support File"
@@ -559,41 +564,41 @@ def collect_controller_support_file(output_dir):
                 print(f"[CONTROLLER] You can manually download from: Settings > System > Maintenance > Download Support File")
             result['elapsed_time'] = time.time() - start_time
             return result
-        
+
         result['success'] = True
         result['file_path'] = str(file_path)
         result['size'] = total_bytes
         result['elapsed_time'] = time.time() - start_time
-        
+
         size_mb = total_bytes / (1024 * 1024)
         with print_lock:
             print(f"[CONTROLLER] [OK] Saved to {filename} ({size_mb:.1f} MB)")
             sys.stdout.flush()
-    
+
     except Exception as e:
         result['error'] = f"Unexpected error: {e}"
         with print_lock:
             print(f"[CONTROLLER] [FAIL] Error: {e}")
-    
+
     if result['elapsed_time'] == 0:
         result['elapsed_time'] = time.time() - start_time
-    
+
     completion_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     result['end_timestamp'] = completion_timestamp
-    
+
     with print_lock:
         if result['success']:
             print(f"[CONTROLLER] [{completion_timestamp}] [OK] Completed in {result['elapsed_time']:.1f}s")
         else:
             print(f"[CONTROLLER] [{completion_timestamp}] [FAIL] Failed after {result['elapsed_time']:.1f}s")
-    
+
     return result
 
 
 def collect_all_ap_logs(output_dir, aps, ssh_username, ssh_password, parallel=0, timeout=60, include_controller=True):
     """
     Collect logs from multiple APs in parallel.
-    
+
     Args:
         output_dir: Base output directory
         aps: List of AP dictionaries from UniFi API
@@ -602,7 +607,7 @@ def collect_all_ap_logs(output_dir, aps, ssh_username, ssh_password, parallel=0,
         parallel: Number of parallel workers (0 = unlimited)
         timeout: SSH timeout in seconds
         include_controller: Whether to collect controller support file
-    
+
     Returns:
         tuple: (ap_results, controller_result, collection_info)
     """
@@ -610,34 +615,35 @@ def collect_all_ap_logs(output_dir, aps, ssh_username, ssh_password, parallel=0,
     timestamp = time.strftime('%Y%m%d-%H%M%S')
     collection_dir = output_dir / f"collection_{timestamp}"
     collection_dir.mkdir(parents=True, exist_ok=True)
-    
+
     print(f"Output directory: {output_dir.absolute()}")
     print(f"Collection directory: {collection_dir.name}\n")
-    
+
     collection_start_time = time.time()
     collection_start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-    
+
     # Determine worker count
     if parallel > 0:
         max_workers = parallel + 1  # +1 for controller
     else:
         max_workers = len(aps) + 1  # All APs + controller
-    
+
     print(f"Using parallel collection with {max_workers} worker(s)\n")
-    
+
     results = []
-    
+
     def collect_with_info(ap_info):
         i, total, ap = ap_info
         ap_name = ap.get("name", "Unknown")
         ap_mac = ap.get("mac", "unknown")
         ap_ip = ap.get("ip")
-        
+        ap_state = unifi_utils.get_ap_state(ap_mac)
+
         with print_lock:
             print(f"{'='*60}")
-            print(f"[{i}/{total}] {ap_name} ({ap_ip}) - {ap.get('state_name', 'unknown')}")
+            print(f"[{i}/{total}] {ap_name} ({ap_ip}) - {ap_state}")
             print(f"{'='*60}\n")
-        
+
         if not ap_ip:
             with print_lock:
                 print(f"WARNING: Skipping {ap_name}: No IP address")
@@ -646,7 +652,7 @@ def collect_all_ap_logs(output_dir, aps, ssh_username, ssh_password, parallel=0,
                 'success': False,
                 'error': 'No IP address'
             }
-        
+
         return collect_logs_from_ap(
             ap_ip=ap_ip,
             ap_name=ap_name,
@@ -656,31 +662,31 @@ def collect_all_ap_logs(output_dir, aps, ssh_username, ssh_password, parallel=0,
             output_dir=collection_dir,
             timeout=timeout
         )
-    
+
     # Execute parallel collection
     ap_infos = [(i, len(aps), ap) for i, ap in enumerate(aps, 1)]
-    
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit controller task if requested
         controller_future = None
         if include_controller:
             controller_future = executor.submit(collect_controller_support_file, collection_dir)
-        
+
         # Submit all AP tasks
         future_to_ap = {executor.submit(collect_with_info, ap_info): ap_info for ap_info in ap_infos}
-        
+
         # Collect AP results as they complete
         for future in as_completed(future_to_ap):
             result = future.result()
             results.append(result)
-        
+
         # Wait for controller result
         controller_result = controller_future.result() if controller_future else None
-    
+
     collection_end_time = time.time()
     collection_end_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
     collection_elapsed = collection_end_time - collection_start_time
-    
+
     collection_info = {
         'start_timestamp': collection_start_timestamp,
         'end_timestamp': collection_end_timestamp,
@@ -688,7 +694,7 @@ def collect_all_ap_logs(output_dir, aps, ssh_username, ssh_password, parallel=0,
         'collection_dir': collection_dir,
         'timestamp': timestamp
     }
-    
+
     return results, controller_result, collection_info
 
 
@@ -703,10 +709,10 @@ def _strip_default_domain(dns_name: str, default_domain: str = "") -> str:
     """
     if not dns_name or dns_name in ["N/A", "No reverse DNS"]:
         return dns_name
-    
+
     if default_domain and dns_name.endswith("." + default_domain):
         return dns_name[: -(len(default_domain) + 1)]
-    
+
     return dns_name
 
 def _build_client_row(client: dict) -> dict:
@@ -727,7 +733,7 @@ def _build_client_row(client: dict) -> dict:
         else "N/A"
     )
     locked_ap_status_display = "Yes" if client.get("is_ap_locked", False) else "No"
-    
+
     # Format uptime for online clients
     uptime_display = "N/A"
     if client.get("is_connected_live") and client.get("live_uptime") is not None:
@@ -736,13 +742,13 @@ def _build_client_row(client: dict) -> dict:
             uptime_display = _format_uptime(int(uptime_seconds))
         except (TypeError, ValueError):
             uptime_display = "N/A"
-    
+
     # Normalize MAC addresses to lowercase
     locked_ap_mac_val = client.get("locked_ap_mac", "N/A")
     locked_ap_mac_display = locked_ap_mac_val.lower() if locked_ap_mac_val != "N/A" else "N/A"
     live_ap_mac_val = client.get("live_ap_mac", "N/A")
     live_ap_mac_display = live_ap_mac_val.lower() if live_ap_mac_val != "N/A" else "N/A"
-    
+
     return {
         "mac": client.get("mac", "N/A").lower() if client.get("mac") else "N/A",
         "hostname": client.get("hostname") or "Unknown Host",
@@ -775,10 +781,10 @@ def _format_security_display(ssid: dict) -> str:
     # Check for WPA2/WPA3 transition (mutual support)
     if ssid.get("wpa3_transition", False):
         return "WPA2/WPA3"
-    
+
     # Get WPA mode (wpa, wpa2, wpa3, open, etc.)
     wpa_mode = ssid.get("wpa_mode", "").lower()
-    
+
     # Direct mapping of wpa_mode values
     wpa_mode_map = {
         "wpa": "WPA",
@@ -787,17 +793,17 @@ def _format_security_display(ssid: dict) -> str:
         "open": "Open",
         "": "Open",
     }
-    
+
     if wpa_mode in wpa_mode_map:
         return wpa_mode_map[wpa_mode]
-    
+
     # Fallback to security field if wpa_mode is not recognized
     security_raw = ssid.get("security", "")
     if not security_raw:
         return "Open"
-    
+
     sec_lower = security_raw.lower()
-    
+
     security_map = {
         "open": "Open",
         "wpapsk": "WPA",
@@ -805,10 +811,10 @@ def _format_security_display(ssid: dict) -> str:
         "wpa3psk": "WPA3",
         "wep": "WEP",
     }
-    
+
     if sec_lower in security_map:
         return security_map[sec_lower]
-    
+
     # Fallback: capitalize if unknown
     return security_raw.upper()
 
@@ -816,52 +822,52 @@ def _calculate_mesh_hops(ap: dict, all_devices: list) -> int:
     """
     Calculate the number of mesh hops for an AP.
     Hops = number of AP-to-AP mesh connections from this AP to a wired AP.
-    
+
     For example:
     - Wired AP = 0 hops
     - AP connected directly to wired AP = 1 hop
     - AP connected to an AP that is connected to wired = 2 hops
     - etc.
-    
+
     Returns the hop count, or 0 if unable to determine.
     """
     visited = set()  # Prevent infinite loops
     current_ap = ap
     hop_count = 0
-    
+
     while True:
         # Check if current AP is wired
         is_wired = current_ap.get('wired')
         if is_wired is True:
             return hop_count
-        
+
         raw_uplink_type = current_ap.get('uplink', {}).get('type')
         if raw_uplink_type == 'wire':
             return hop_count
-        
+
         # Get the uplink AP MAC
         uplink_mac = current_ap.get('uplink_ap_mac') or current_ap.get('last_uplink', {}).get('uplink_mac')
-        
+
         if not uplink_mac or uplink_mac == "N/A":
             # No uplink found, return what we have
             return hop_count
-        
+
         # Prevent infinite loops
         if uplink_mac in visited:
             return hop_count
         visited.add(uplink_mac)
-        
+
         # Find the uplink AP device
         uplink_ap = None
         for device in all_devices:
             if device.get('mac') == uplink_mac and device.get('type') == 'uap':
                 uplink_ap = device
                 break
-        
+
         if not uplink_ap:
             # Can't find the uplink AP, return what we have
             return hop_count
-        
+
         # Move to uplink AP and increment hop count
         current_ap = uplink_ap
         hop_count += 1
@@ -870,18 +876,18 @@ def _build_ssid_row(ssid: dict) -> dict:
     """
     Build a display row for a single SSID.
     Returns a dict with all column values ready for display.
-    
+
     Band is determined from wlan_bands field (array of "2g", "5g", "6g").
     Falls back to wlan_band if wlan_bands not available.
     Security is determined from wpa_mode with fallback to security field.
     """
     enabled_display = "Yes" if ssid.get("enabled", False) else "No"
     security_display = _format_security_display(ssid)
-    
+
     # Get band from wlan_bands array or wlan_band string
     bands = []
     wlan_bands = ssid.get("wlan_bands", [])
-    
+
     if wlan_bands:
         # wlan_bands is an array like ["5g"] or ["2g", "5g"]
         for band in wlan_bands:
@@ -900,9 +906,9 @@ def _build_ssid_row(ssid: dict) -> dict:
             bands.append("5GHz")
         elif wlan_band == "6g":
             bands.append("6GHz")
-    
+
     band_display = ", ".join(bands) if bands else "N/A"
-    
+
     return {
         "name": ssid.get("name", "N/A"),
         "enabled": enabled_display,
@@ -918,7 +924,7 @@ def _format_uptime(uptime_seconds: int) -> str:
     """
     if not uptime_seconds or uptime_seconds <= 0:
         return "N/A"
-    
+
     # Calculate time units
     total_seconds = uptime_seconds
     years = total_seconds // (365 * 86400)
@@ -933,7 +939,7 @@ def _format_uptime(uptime_seconds: int) -> str:
     total_seconds %= 3600
     minutes = total_seconds // 60
     secs = total_seconds % 60
-    
+
     # List of (value, unit) tuples in order from longest to shortest
     units = [
         (years, "y"),
@@ -941,17 +947,17 @@ def _format_uptime(uptime_seconds: int) -> str:
         (weeks, "w"),
         (days, "d"),
     ]
-    
+
     # Find first non-zero unit
     started = False
     parts = []
-    
+
     for value, unit in units:
         if value > 0:
             started = True
         if started:
             parts.append(f"{value}{unit}")
-    
+
     # Always show time component (h:m:s) if we've started or there's time left
     if started or hours > 0 or minutes > 0 or secs > 0:
         time_str = f"{hours}h:{minutes:02d}m:{secs:02d}s"
@@ -959,7 +965,7 @@ def _format_uptime(uptime_seconds: int) -> str:
         if not started and hours == 0 and minutes == 0:
             return f"{secs}s"
         parts.append(time_str)
-    
+
     return " ".join(parts) if parts else "0s"
 
 def _build_ap_row(ap: dict, all_devices: list) -> dict:
@@ -972,11 +978,11 @@ def _build_ap_row(ap: dict, all_devices: list) -> dict:
     ip_address = ap.get("ip", "N/A")
     version = ap.get("version", "N/A")
     uptime_seconds = ap.get("uptime", 0)
-    
+
     # Determine connection type (wired vs mesh)
     connection_type_display = "N/A"
     is_wired_status = ap.get('wired')
-    
+
     if is_wired_status is True:
         connection_type_display = "wired"
     elif is_wired_status is False:
@@ -987,20 +993,20 @@ def _build_ap_row(ap: dict, all_devices: list) -> dict:
             connection_type_display = "wired"
         elif raw_uplink_type in ['mesh', 'wireless']:
             connection_type_display = "mesh"
-    
+
     # For mesh APs, calculate hop count
     if connection_type_display == "mesh":
         hops = _calculate_mesh_hops(ap, all_devices)
         hop_label = "hop" if hops == 1 else "hops"
         connection_type_display = f"mesh ({hops}-{hop_label})"
-    
+
     # Determine uplink AP name and MAC for mesh APs
     uplink_ap_name_display = "N/A"
     uplink_ap_mac_display = "N/A"
-    
+
     if "mesh" in connection_type_display:
         uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
-        
+
         if uplink_mac and uplink_mac != "N/A":
             uplink_ap_mac_display = uplink_mac
             # Look up the uplink AP's name
@@ -1013,13 +1019,13 @@ def _build_ap_row(ap: dict, all_devices: list) -> dict:
         else:
             uplink_ap_name_display = "No Uplink"
             uplink_ap_mac_display = "No Uplink"
-    
+
     # Format uptime using the new formatter
     uptime_str = _format_uptime(uptime_seconds)
-    
+
     # Get AP state (returns string directly)
     state_desc = unifi_utils.get_ap_state(mac_address)
-    
+
     return {
         "name": ap_name,
         "mac": mac_address,
@@ -1044,32 +1050,32 @@ def print_ssid_table(ssids: list, enabled_columns: list, reverse: bool = False):
         if col_key in SSID_COLUMN_SCHEMA:
             header, default_width = SSID_COLUMN_SCHEMA[col_key]
             display_column_definitions.append((header, col_key, default_width))
-    
+
     if not display_column_definitions:
         print("Error: No columns are enabled for display.")
         return
-    
+
     # Build all row data first
     all_row_data = []
     for ssid in ssids:
         all_row_data.append(_build_ssid_row(ssid))
-    
+
     # Calculate dynamic column widths based on data
     max_widths = {header: max(len(header), default_width) for header, _, default_width in display_column_definitions}
-    
+
     for row_data in all_row_data:
         for header, key_name, _ in display_column_definitions:
             val = str(row_data.get(key_name, "N/A"))
             max_widths[header] = max(max_widths[header], len(val))
-    
+
     # Add padding to final widths
     final_widths = {h: w + 2 for h, w in max_widths.items()}
     total_width = sum(final_widths[h] for h, _, _ in display_column_definitions) + (len(display_column_definitions) * 3) - 3
-    
+
     # Apply sorting when using column switches
     # Sort by first column primarily, with N/A values always at the end
     _apply_sort_with_na_at_end(all_row_data, lambda row: _get_multi_level_sort_key(row, display_column_definitions), reverse)
-    
+
     # Print header
     print("-" * total_width)
     header_line = ""
@@ -1077,7 +1083,7 @@ def print_ssid_table(ssids: list, enabled_columns: list, reverse: bool = False):
         header_line += f"{header:<{final_widths[header]}} | "
     print(header_line.rstrip(" |"))
     print("-" * total_width)
-    
+
     # Print data rows
     for row_data in all_row_data:
         data_line = ""
@@ -1086,7 +1092,7 @@ def print_ssid_table(ssids: list, enabled_columns: list, reverse: bool = False):
             width = final_widths[header]
             data_line += f"{val:<{width}.{width}} | "
         print(data_line.rstrip(" |"))
-    
+
     print("-" * total_width)
 
 def print_ap_table(aps: list, all_devices: list, enabled_columns: list, reverse: bool = False):
@@ -1099,28 +1105,28 @@ def print_ap_table(aps: list, all_devices: list, enabled_columns: list, reverse:
     if not aps:
         print("No APs to display")
         return
-    
+
     # Check if all APs are wired (no mesh)
     all_wired = all(ap.get('wired') is True or ap.get('uplink', {}).get('type') == 'wire' for ap in aps)
-    
+
     # Build the list of columns to display
     display_column_definitions = []
     for col_key in enabled_columns:
         # Skip uplink columns if all APs are wired
         if all_wired and col_key in ['uplink_ap_name', 'uplink_ap_mac']:
             continue
-        
+
         if col_key in AP_COLUMN_SCHEMA:
             header, default_width = AP_COLUMN_SCHEMA[col_key]
             display_column_definitions.append((header, col_key, default_width))
-    
+
     if not display_column_definitions:
         print("Error: No columns are enabled for display.")
         return
-    
+
     # Build all row data first
     all_row_data = [_build_ap_row(ap, all_devices) for ap in aps]
-    
+
     # Calculate dynamic column widths: max of header length and longest data value
     max_widths = {}
     for header, col_key, _ in display_column_definitions:
@@ -1128,24 +1134,24 @@ def print_ap_table(aps: list, all_devices: list, enabled_columns: list, reverse:
         # Find max length of data in this column
         data_len = max(len(str(row.get(col_key, "N/A"))) for row in all_row_data)
         max_widths[header] = max(header_len, data_len)
-    
+
     # Add 1 space padding to final widths
     final_widths = {h: w + 1 for h, w in max_widths.items()}
-    
+
     # Calculate total width: sum of column widths + separators (" | ")
     separator = " | "
     total_width = sum(final_widths[h] for h, _, _ in display_column_definitions) + (len(display_column_definitions) - 1) * len(separator)
-    
+
     # Apply sorting when using column switches
     # Sort by first column primarily, with N/A values always at the end
     _apply_sort_with_na_at_end(all_row_data, lambda row: _get_multi_level_sort_key(row, display_column_definitions), reverse)
-    
+
     # Print header
     print("-" * total_width)
     header_line = separator.join(f"{header:<{final_widths[header]}}" for header, _, _ in display_column_definitions)
     print(header_line)
     print("-" * total_width)
-    
+
     # Print data rows
     for row_data in all_row_data:
         data_line = separator.join(
@@ -1153,7 +1159,7 @@ def print_ap_table(aps: list, all_devices: list, enabled_columns: list, reverse:
             for header, key_name, _ in display_column_definitions
         )
         print(data_line)
-    
+
     print("-" * total_width)
 
 def _build_ap_branch_aps(target_ap: dict, all_devices: list) -> list:
@@ -1163,38 +1169,38 @@ def _build_ap_branch_aps(target_ap: dict, all_devices: list) -> list:
     """
     branch_aps = [target_ap]
     current_ap = target_ap
-    
+
     # Walk up the chain to find all ancestors
     visited = set([current_ap.get('mac')])
     while True:
         uplink_mac = current_ap.get('uplink_ap_mac') or current_ap.get('last_uplink', {}).get('uplink_mac')
         if not uplink_mac or uplink_mac == "N/A":
             break
-        
+
         # Prevent infinite loops
         if uplink_mac in visited:
             break
         visited.add(uplink_mac)
-        
+
         # Find the uplink AP
         uplink_ap = None
         for device in all_devices:
             if device.get('mac') == uplink_mac and device.get('type') == 'uap':
                 uplink_ap = device
                 break
-        
+
         if not uplink_ap:
             break
-        
+
         branch_aps.insert(0, uplink_ap)
-        
+
         # Check if this AP is wired
         is_wired = uplink_ap.get('wired') is True or uplink_ap.get('uplink', {}).get('type') == 'wire'
         if is_wired:
             break
-        
+
         current_ap = uplink_ap
-    
+
     return branch_aps
 
 def serialize_ap_topology(aps: list) -> list:
@@ -1202,25 +1208,25 @@ def serialize_ap_topology(aps: list) -> list:
     Serialize AP topology to a simple list format for storage/transmission.
     Each entry is a dict with: {mac, uplink_mac, name}
     uplink_mac is None for wired root APs.
-    
+
     Args:
         aps: List of AP devices from UniFi
-    
+
     Returns:
         List of dicts: [{"mac": "xx:xx:...", "uplink_mac": "yy:yy:..." or None, "name": "AP Name"}, ...]
     """
     topology = []
-    
+
     for ap in aps:
         ap_mac = ap.get('mac', '').lower() if ap.get('mac') else None
         if not ap_mac:
             continue
-        
+
         ap_name = ap.get('name') or ap.get('model', 'Unknown AP')
-        
+
         # Determine if this is a wired root AP
         is_wired = ap.get('wired') is True or ap.get('uplink', {}).get('type') == 'wire'
-        
+
         if is_wired:
             uplink_mac = None
         else:
@@ -1228,39 +1234,39 @@ def serialize_ap_topology(aps: list) -> list:
             uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
             if uplink_mac:
                 uplink_mac = uplink_mac.lower()
-        
+
         topology.append({
             'mac': ap_mac,
             'uplink_mac': uplink_mac,
             'name': ap_name
         })
-    
+
     return topology
 
 def deserialize_ap_topology(topology: list) -> list:
     """
     Deserialize AP topology from simple list format back to AP objects.
     Each entry should be a dict with: {mac, uplink_mac, name}
-    
+
     Args:
         topology: List of dicts with AP topology data
-    
+
     Returns:
         List of AP dicts with minimal structure needed for display_ap_tree
     """
     aps = []
-    
+
     for entry in topology:
         if not isinstance(entry, dict):
             continue
-        
+
         mac = entry.get('mac', '').lower() if entry.get('mac') else None
         name = entry.get('name', 'Unknown AP')
         uplink_mac = entry.get('uplink_mac')
-        
+
         if not mac:
             continue
-        
+
         # Build minimal AP object for tree display
         ap_obj = {
             'mac': mac,
@@ -1272,18 +1278,18 @@ def deserialize_ap_topology(topology: list) -> list:
                 'type': 'wire' if uplink_mac is None else 'mesh'
             }
         }
-        
+
         aps.append(ap_obj)
-    
+
     return aps
 
 def ap_topology_to_json(aps: list) -> str:
     """
     Serialize AP topology to JSON string.
-    
+
     Args:
         aps: List of AP devices from UniFi
-    
+
     Returns:
         JSON string representing the topology
     """
@@ -1293,10 +1299,10 @@ def ap_topology_to_json(aps: list) -> str:
 def ap_topology_from_json(json_str: str) -> list:
     """
     Deserialize AP topology from JSON string back to AP objects.
-    
+
     Args:
         json_str: JSON string containing AP topology
-    
+
     Returns:
         List of AP objects ready for display_ap_tree
     """
@@ -1311,19 +1317,19 @@ def ap_topology_from_json(json_str: str) -> list:
 def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True):
     """
     Displays the AP network as a tree structure showing mesh topology.
-    
+
     Args:
         aps: List of AP devices. Can be either:
             - Live AP data from UniFi (with fields: mac, name, wired, uplink_ap_mac, etc.)
             - Deserialized AP topology from deserialize_ap_topology()
         all_devices: List of all devices (optional, for reference)
         show_macs: If True, display MAC addresses for each AP (default: True)
-    
+
     Examples:
         # Display from live UniFi data
         aps = unifi_utils.get_devices()
         display_ap_tree(aps, all_devices=aps)
-        
+
         # Display from serialized topology
         topology = serialize_ap_topology(live_aps)
         # ... later, restore and display
@@ -1333,17 +1339,17 @@ def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True)
     print("\n" + "="*80)
     print("## AP Network Tree View")
     print("="*80 + "\n")
-    
+
     ap_by_mac = {ap['mac']: ap for ap in aps if 'mac' in ap}
     wired_roots = []
     mesh_children_map = defaultdict(list)
     printed_macs = set()
-    
+
     # Classify APs as wired roots or mesh children
     for ap in aps:
         connection_type = 'N/A'
         is_wired_status = ap.get('wired')
-        
+
         if is_wired_status is True:
             connection_type = 'wired'
         elif is_wired_status is False:
@@ -1354,22 +1360,22 @@ def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True)
                 connection_type = 'wired'
             elif raw_uplink_type in ['mesh', 'wireless']:
                 connection_type = 'mesh'
-        
+
         if connection_type == 'wired':
             wired_roots.append(ap)
         elif connection_type == 'mesh':
             uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
             if uplink_mac and uplink_mac != 'N/A' and uplink_mac in ap_by_mac:
                 mesh_children_map[uplink_mac].append(ap)
-    
+
     # Recursive function to print tree nodes
     def _print_node_recursive(ap_node, prefix=""):
         if ap_node['mac'] in printed_macs:
             return
-        
+
         node_name = ap_node.get('name') or ap_node.get('model', 'Unknown AP')
         node_mac = ap_node.get('mac', 'N/A')
-        
+
         if not prefix:  # Root node
             if show_macs:
                 print(f"{node_name} ({node_mac}) - Wired Uplink")
@@ -1380,16 +1386,16 @@ def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True)
                 print(f"{prefix}{node_name} ({node_mac})")
             else:
                 print(f"{prefix}{node_name}")
-        
+
         printed_macs.add(ap_node['mac'])
-        
+
         children = mesh_children_map.get(ap_node['mac'], [])
         children.sort(key=lambda x: x.get('name', '').lower())
-        
+
         for i, child in enumerate(children):
             is_last = (i == len(children) - 1)
             child_prefix_segment = "+-- " if is_last else "|-- "
-            
+
             new_prefix = ""
             if not prefix:  # Direct children of root
                 new_prefix = "  " + child_prefix_segment
@@ -1401,25 +1407,25 @@ def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True)
                     new_prefix = prefix[:-4] + "    " + child_prefix_segment
                 else:
                     new_prefix = prefix + child_prefix_segment
-            
+
             _print_node_recursive(child, new_prefix)
-    
+
     # Print the tree
     wired_roots.sort(key=lambda x: x.get('name', '').lower())
-    
+
     if not wired_roots:
         print("No wired APs found. Network topology might be entirely mesh.")
     else:
         for root_ap in wired_roots:
             _print_node_recursive(root_ap)
-    
+
     # Print orphan mesh APs
     orphan_mesh_aps = [
         ap for ap in aps
         if ap.get('mac') not in printed_macs and ap.get('wired') is False and
            (ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac'))
     ]
-    
+
     if orphan_mesh_aps:
         print("\n---")
         print("## Orphan Mesh APs (Uplink not traceable)")
@@ -1433,7 +1439,7 @@ def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True)
                 print(f"- {ap_name} ({ap_mac}), Uplink MAC: {uplink_mac}")
             else:
                 print(f"- {ap_name} (Uplink MAC: {uplink_mac})")
-    
+
     print("\n" + "="*80)
 
 def calculate_ap_mesh_depths(aps: list) -> dict:
@@ -1443,53 +1449,53 @@ def calculate_ap_mesh_depths(aps: list) -> dict:
     """
     ap_by_mac = {ap.get('mac'): ap for ap in aps if ap.get('mac')}
     depths = {}
-    
+
     # First pass: identify wired roots (depth 0)
     for ap in aps:
         is_wired = ap.get('wired')
         uplink_type = ap.get('uplink', {}).get('type')
-        
+
         is_root = is_wired is True or uplink_type == 'wire'
-        
+
         if is_root:
             depths[ap.get('mac')] = 0
-    
+
     # Second pass: calculate depths for mesh APs using BFS (breadth-first search)
     # This ensures we get correct depths even in complex multi-layer mesh topologies
     max_iterations = len(aps)  # Prevent infinite loops
     iteration = 0
-    
+
     while len(depths) < len(aps) and iteration < max_iterations:
         iteration += 1
         for ap in aps:
             ap_mac = ap.get('mac')
             if ap_mac in depths:
                 continue  # Already calculated
-            
+
             # Find parent AP
             uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
-            
+
             if uplink_mac and uplink_mac in depths:
                 # Parent depth is known, so this AP's depth is parent's depth + 1
                 depths[ap_mac] = depths[uplink_mac] + 1
-    
+
     # Any remaining APs without known uplink get depth -1 (orphans)
     for ap in aps:
         ap_mac = ap.get('mac')
         if ap_mac not in depths:
             depths[ap_mac] = -1
-    
+
     return depths
 
 def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
     """
     Wait for mesh topology to rebuild to match desired state.
-    
+
     Args:
         desired_topology: Target topology (serialized format from serialize_ap_topology)
                          List of dicts: [{"mac": "xx:xx:...", "uplink_mac": "yy:yy:..." or None, "name": "AP Name"}, ...]
         timeout_minutes: Maximum time to wait in minutes (default: 75 minutes)
-    
+
     Process:
     1. Fetch current APs from UniFi and extract their topology
     2. Verify device list matches (same MACs)
@@ -1501,15 +1507,15 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
     8. Timeout after specified time period
     """
     import time
-    
+
     if not desired_topology:
         print("Error: No desired topology provided")
         sys.exit(1)
-    
+
     # Extract desired MAC set from desired topology
     desired_macs = {entry['mac'].lower() if entry['mac'] else None for entry in desired_topology}
     desired_macs.discard(None)
-    
+
     # Create lookup dicts for desired topology
     desired_by_mac = {}
     desired_names_by_mac = {}
@@ -1518,19 +1524,19 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
         if mac:
             desired_by_mac[mac] = entry.get('uplink_mac', '').lower() if entry.get('uplink_mac') else None
             desired_names_by_mac[mac] = entry.get('name', 'Unknown AP')
-    
+
     print("\nValidating desired topology...")
-    
+
     # Do an initial check to validate MAC/name consistency
     current_devices = unifi_utils.get_devices()
     current_aps = [d for d in current_devices if d.get("type") == "uap"]
     current_macs = {ap.get('mac', '').lower() for ap in current_aps if ap.get('mac')}
-    
+
     # Check MAC set matches
     if current_macs != desired_macs:
         missing_macs = desired_macs - current_macs
         extra_macs = current_macs - desired_macs
-        
+
         if missing_macs or extra_macs:
             print(f"\n[FAIL] Device list mismatch:")
             if missing_macs:
@@ -1539,20 +1545,20 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                 print(f"  Extra APs in current system: {', '.join(sorted(extra_macs))}")
             print("\nAborted: Cannot rebuild to desired topology when device set differs.")
             sys.exit(1)
-    
+
     # Build current AP lookup with names
     current_names_by_mac = {}
     for ap in current_aps:
         mac = ap.get('mac', '').lower() if ap.get('mac') else None
         if mac:
             current_names_by_mac[mac] = ap.get('name') or ap.get('model', 'Unknown AP')
-    
+
     # Validate that names match for all common MACs
     name_mismatches = []
     for mac in desired_macs:
         desired_name = desired_names_by_mac.get(mac, 'Unknown AP')
         current_name = current_names_by_mac.get(mac, 'Unknown AP')
-        
+
         # Normalize names for comparison (case-insensitive comparison)
         if desired_name.lower() != current_name.lower():
             name_mismatches.append({
@@ -1560,7 +1566,7 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                 'desired': desired_name,
                 'current': current_name
             })
-    
+
     if name_mismatches:
         print(f"\n[FAIL] AP name mismatches detected:")
         for mismatch in name_mismatches:
@@ -1568,25 +1574,25 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
         print("\nAborted: AP names in desired topology do not match current system.")
         print("Please update your topology file to match current AP names.")
         sys.exit(1)
-    
+
     print("[OK] Topology validation passed (MACs and names match)")
-    
+
     check_interval = 5  # 5 seconds
     timeout_seconds = timeout_minutes * 60
     max_checks = timeout_seconds // check_interval
     last_activity_check = 0
     start_time = time.time()
-    
+
     # Track previous topology for detecting changes
     last_topology = {}
     topology_displayed = False
     topology_changed = False
-    
+
     for check_num in range(1, max_checks + 1):
         # Fetch current APs from UniFi
         current_devices = unifi_utils.get_devices()
         current_aps = [d for d in current_devices if d.get("type") == "uap"]
-        
+
         # Build lookup for current APs
         current_by_mac = {}
         current_names_by_mac = {}
@@ -1603,34 +1609,34 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                     if uplink_mac:
                         uplink_mac = uplink_mac.lower()
                     current_by_mac[mac] = uplink_mac
-        
+
         # Display initial diff on first check
         if not topology_displayed:
             topology_displayed = True
-            
+
             # Categorize APs into correct and incorrect lists
             correct_aps = []
             incorrect_aps = []
-            
+
             for mac in sorted(desired_by_mac.keys()):
                 ap_name = desired_names_by_mac.get(mac, 'Unknown')
                 desired_uplink = desired_by_mac[mac]
                 current_uplink = current_by_mac.get(mac)
                 ap_state = unifi_utils.get_ap_state(mac)
-                
+
                 # Format uplink displays with names
                 if desired_uplink is None:
                     desired_uplink_display = 'WIRED'
                 else:
                     desired_uplink_name = desired_names_by_mac.get(desired_uplink, 'Unknown')
                     desired_uplink_display = f'{desired_uplink_name} ({desired_uplink})'
-                
+
                 if current_uplink is None:
                     current_uplink_display = 'WIRED'
                 else:
                     current_uplink_name = current_names_by_mac.get(current_uplink, 'Unknown')
                     current_uplink_display = f'{current_uplink_name} ({current_uplink})'
-                
+
                 ap_info = {
                     'mac': mac,
                     'name': ap_name,
@@ -1638,30 +1644,30 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                     'desired': desired_uplink_display,
                     'state': ap_state
                 }
-                
+
                 # Categorize based on parking status and AP state
                 if desired_uplink == current_uplink and ap_state == "RUNNING":
                     correct_aps.append(ap_info)
                 else:
                     incorrect_aps.append(ap_info)
-            
+
             # Display correct APs
             print(f"Initial parking status: {len(correct_aps)} correct, {len(incorrect_aps)} incorrect")
-            
+
             if correct_aps:
                 print(f"\n[OK] Correctly Parked & Online ({len(correct_aps)}):")
                 for ap in correct_aps:
                     print(f"  {ap['name']} ({ap['mac']}): {ap['current']} - [{ap['state']}]")
-            
+
             if incorrect_aps:
                 print(f"\n[FAIL] Incorrectly Parked or Offline ({len(incorrect_aps)}):")
                 for ap in incorrect_aps:
                     print(f"  {ap['name']} ({ap['mac']}) [{ap['state']}]")
                     print(f"    Current: {ap['current']}")
                     print(f"    Desired: {ap['desired']}")
-            
+
             print()
-        
+
         # Detect changes from last topology and count parking status
         changes = {}
         all_correctly_parked = True
@@ -1669,11 +1675,11 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
         incorrectly_parked_count = 0
         running_count = 0
         not_running_count = 0
-        
+
         for mac in current_by_mac:
             current_uplink = current_by_mac[mac]
             desired_uplink = desired_by_mac.get(mac)
-            
+
             # Check AP state
             ap_state = unifi_utils.get_ap_state(mac)
             if ap_state == "RUNNING":
@@ -1681,21 +1687,21 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
             else:
                 not_running_count += 1
                 all_correctly_parked = False
-            
+
             # Check if correctly parked
             if current_uplink == desired_uplink and ap_state == "RUNNING":
                 correctly_parked_count += 1
             else:
                 incorrectly_parked_count += 1
                 all_correctly_parked = False
-            
+
             # Check if uplink changed from last check
             if mac in last_topology and last_topology[mac] != current_uplink:
                 changes[mac] = {
                     'old': last_topology[mac],
                     'new': current_uplink
                 }
-        
+
         # Report uplink changes
         if changes:
             topology_changed = True
@@ -1705,33 +1711,33 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                 ap_name = current_names_by_mac.get(mac, 'Unknown')
                 old_uplink = change['old']
                 new_uplink = change['new']
-                
+
                 # Get old uplink name and MAC display
                 if old_uplink is None:
                     old_uplink_display = 'WIRED'
                 else:
                     old_uplink_name = current_names_by_mac.get(old_uplink, 'Unknown')
                     old_uplink_display = f'{old_uplink_name} ({old_uplink})'
-                
+
                 # Get new uplink name and MAC display
                 if new_uplink is None:
                     new_uplink_display = 'WIRED'
                 else:
                     new_uplink_name = current_names_by_mac.get(new_uplink, 'Unknown')
                     new_uplink_display = f'{new_uplink_name} ({new_uplink})'
-                
+
                 # Determine parking status after move
                 if new_uplink == desired_by_mac.get(mac):
                     parking_status = "[CORRECTLY PARKED]"
                 else:
                     parking_status = "[PARKING VIOLATION]"
-                
+
                 print(f"  {ap_name} ({mac})")
                 print(f"    From: {old_uplink_display}")
                 print(f"    To:   {new_uplink_display} {parking_status}")
-            
+
             last_activity_check = check_num
-        
+
         # Check if all correctly parked
         if all_correctly_parked:
             elapsed = time.time() - start_time
@@ -1741,27 +1747,27 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                 print(f"\n[OK] All APs already correctly parked (topology unchanged)")
             print(f"  All {correctly_parked_count} APs correctly parked and in RUNNING state")
             return
-        
+
         # Report statistics every minute with no activity
         checks_since_activity = check_num - last_activity_check
         if checks_since_activity > 0 and checks_since_activity % 12 == 0:  # Every 60 seconds (12 * 5s)
             elapsed = time.time() - start_time
             print(f"[{elapsed:.0f}s] Status: {correctly_parked_count} correct, {incorrectly_parked_count} incorrect | {running_count} running, {not_running_count} not running")
-        
+
         # Update last topology
         last_topology = current_by_mac.copy()
-        
+
         # Sleep before next check (not before first check)
         time.sleep(check_interval)
-    
+
     # Timeout - build final report
     elapsed = time.time() - start_time
     timeout_minutes_display = timeout_minutes
-    
+
     # Recalculate current state for final report
     current_devices = unifi_utils.get_devices()
     current_aps = [d for d in current_devices if d.get("type") == "uap"]
-    
+
     current_names_by_mac = {}
     current_by_mac = {}
     for ap in current_aps:
@@ -1776,30 +1782,30 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
                 if uplink_mac:
                     uplink_mac = uplink_mac.lower()
                 current_by_mac[mac] = uplink_mac
-    
+
     # Categorize APs for final report
     correct_aps = []
     incorrect_aps = []
-    
+
     for mac in sorted(desired_by_mac.keys()):
         ap_name = desired_names_by_mac.get(mac, 'Unknown')
         desired_uplink = desired_by_mac[mac]
         current_uplink = current_by_mac.get(mac)
         ap_state = unifi_utils.get_ap_state(mac)
-        
+
         # Format uplink displays with names
         if current_uplink is None:
             current_uplink_display = 'WIRED'
         else:
             current_uplink_name = current_names_by_mac.get(current_uplink, 'Unknown')
             current_uplink_display = f'{current_uplink_name} ({current_uplink})'
-        
+
         if desired_uplink is None:
             desired_uplink_display = 'WIRED'
         else:
             desired_uplink_name = desired_names_by_mac.get(desired_uplink, 'Unknown')
             desired_uplink_display = f'{desired_uplink_name} ({desired_uplink})'
-        
+
         ap_info = {
             'mac': mac,
             'name': ap_name,
@@ -1807,23 +1813,23 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
             'desired': desired_uplink_display,
             'state': ap_state
         }
-        
+
         # Categorize
         if desired_uplink == current_uplink and ap_state == "RUNNING":
             correct_aps.append(ap_info)
         else:
             incorrect_aps.append(ap_info)
-    
+
     print(f"\n[WARNING] Timeout after {elapsed:.0f}s ({timeout_minutes_display} minutes)")
     print(f"Final status: {len(correct_aps)} correctly parked, {len(incorrect_aps)} parking violations")
     print(f"AP states: {running_count} running, {not_running_count} not running")
-    
+
     # Display correctly parked APs
     if correct_aps:
         print(f"\n[OK] Correctly Parked & Online ({len(correct_aps)}):")
         for ap in correct_aps:
             print(f"  {ap['name']} ({ap['mac']}): {ap['current']} - [{ap['state']}]")
-    
+
     # Display incorrectly parked or offline APs
     if incorrect_aps:
         print(f"\n[FAIL] Incorrectly Parked or Offline ({len(incorrect_aps)}):")
@@ -1831,7 +1837,7 @@ def _wait_for_mesh_topology(desired_topology: list, timeout_minutes: int = 75):
             print(f"  {ap['name']} ({ap['mac']}) [{ap['state']}]")
             print(f"    Current: {ap['current']}")
             print(f"    Desired: {ap['desired']}")
-    
+
     print("\nAborting: Some APs still have parking violations or are not in running state.")
     sys.exit(1)
 
@@ -1843,7 +1849,7 @@ def handle_forget_action_batch(clients: list):
     if not mac_list:
         return
     print(f"\nSending batch 'forget' command for {len(mac_list)} clients at once...")
-    
+
     # Use constants from config module
     if not UNIFI_NETWORK_URL:
         print("\nERROR: UNIFI_NETWORK_URL is not defined. Cannot proceed.")
@@ -1865,7 +1871,7 @@ def handle_forget_action_batch(clients: list):
 def print_action_results_table(clients_data: list, action_type: str, results: dict):
     """
     Prints a formatted table of action results (lock, unlock, reconnect, etc.)
-    
+
     Args:
         clients_data: List of client dicts
         action_type: Type of action ('reconnect', 'lock', 'unlock', 'block', 'unblock')
@@ -1883,15 +1889,15 @@ def print_action_results_table(clients_data: list, action_type: str, results: di
             "mac": mac,
             "status": status_symbol
         })
-    
+
     if not rows:
         return
-    
+
     # Calculate column widths
     name_width = max(len("Device Name"), max(len(row["name"]) for row in rows))
     mac_width = max(len("MAC Address"), 17)
     status_width = max(len("Result"), len("OK"))
-    
+
     # Print header
     print()
     total_width = name_width + mac_width + status_width + 8
@@ -1899,12 +1905,12 @@ def print_action_results_table(clients_data: list, action_type: str, results: di
     header_line = f"{'Device Name':<{name_width}}  {'MAC Address':<{mac_width}}  {'Result':<{status_width}}"
     print(header_line)
     print("-" * total_width)
-    
+
     # Print data rows
     for row in rows:
         data_line = f"{row['name']:<{name_width}}  {row['mac']:<{mac_width}}  {row['status']:<{status_width}}"
         print(data_line)
-    
+
     print("-" * total_width)
     print()
 
@@ -1913,11 +1919,11 @@ def _get_multi_level_sort_key(row_data: dict, display_columns: list) -> tuple:
     Generate a multi-level sort key tuple for a client row.
     Sorts by first column, then second column (as tiebreaker), etc.
     N/A values always sort to the end.
-    
+
     Args:
         row_data: Dictionary with client display values
         display_columns: List of (header, col_key, default_width) tuples in display order
-    
+
     Returns:
         Tuple of sort keys for each column in order
     """
@@ -1930,7 +1936,7 @@ def _apply_sort_with_na_at_end(row_data_list: list, sort_key_func, reverse: bool
     """
     Sort a list of rows using the given sort key function,
     ensuring N/A values always sort to the end (or beginning if reverse=True, but after real values).
-    
+
     The sort key function should return tuples where first element is (is_na, value).
     When reverse=True, we need to handle N/A placement specially.
     """
@@ -1940,11 +1946,11 @@ def _apply_sort_with_na_at_end(row_data_list: list, sort_key_func, reverse: bool
     else:
         # Reverse sort: need to reverse the actual values but keep N/A at the end
         # We'll split the list into real values and N/A values, sort real values reverse, then append N/A values
-        
+
         # First, separate rows into real values and N/A values
         real_rows = []
         na_rows = []
-        
+
         for row in row_data_list:
             sort_key = sort_key_func(row)
             # Check if first element of first tuple indicates N/A
@@ -1954,10 +1960,10 @@ def _apply_sort_with_na_at_end(row_data_list: list, sort_key_func, reverse: bool
                 na_rows.append(row)
             else:
                 real_rows.append(row)
-        
+
         # Sort real rows in reverse
         real_rows.sort(key=sort_key_func, reverse=True)
-        
+
         # Combine: real rows first (reverse order), then N/A rows
         row_data_list.clear()
         row_data_list.extend(real_rows)
@@ -1970,18 +1976,18 @@ def _parse_uptime_to_seconds(uptime_str: str) -> int:
     """
     if not uptime_str or uptime_str == "N/A":
         return -1
-    
+
     try:
         total_seconds = 0
-        
+
         # Split on spaces to separate major units (y, m, w, d) from time part (h:m:s)
         parts = uptime_str.split()
-        
+
         for part in parts:
             if ':' in part:
                 # This is the time part (h:m:s or m:s)
                 time_components = part.split(':')
-                
+
                 # Parse components: remove trailing letters (h, m, s)
                 if len(time_components) == 3:
                     # h:mm:ss format (e.g., "4h:05m:06s")
@@ -2009,7 +2015,7 @@ def _parse_uptime_to_seconds(uptime_str: str) -> int:
             elif part.endswith('s'):
                 # Seconds only (e.g., "45s")
                 total_seconds += int(part[:-1])
-        
+
         return total_seconds
     except (ValueError, IndexError, AttributeError):
         return -1
@@ -2131,26 +2137,26 @@ def get_sort_key_value(row_data: dict, col: str):
 def print_clients_table(clients_data: list, enabled_columns: list, is_default_columns: bool = False, reverse: bool = False):
     """
     Prints a formatted table of client data based on enabled columns.
-    
+
     If is_default_columns is True (no +/- column switches used):
     - Omit locked columns if no clients are locked to any AP
     - Omit DNS name column if all clients lack valid DNS names
-    
+
     If is_default_columns is False (using +/- switches):
     - Sort clients by displayed columns in order (first column primary, second as tiebreaker, etc.)
-    
+
     If reverse is True, sorts in descending order. N/A values always sort to the end.
-    
+
     Always strips default domain suffix from DNS names to make them narrower.
     """
     if not clients_data:
         print("No clients to display")
         return
-    
+
     # Check for locked clients and valid DNS names (only for default columns)
     has_any_locked = False
     has_any_valid_dns = False
-    
+
     if is_default_columns:
         for client in clients_data:
             if client.get("is_ap_locked", False):
@@ -2158,7 +2164,7 @@ def print_clients_table(clients_data: list, enabled_columns: list, is_default_co
             dns_name = client.get("dns_name", "N/A")
             if dns_name not in ["N/A", "No reverse DNS"]:
                 has_any_valid_dns = True
-    
+
     # Build the list of columns to display
     display_column_definitions = []
     for col_key in enabled_columns:
@@ -2168,15 +2174,15 @@ def print_clients_table(clients_data: list, enabled_columns: list, is_default_co
         # Skip DNS name column if using defaults and all DNS names are invalid
         if is_default_columns and not has_any_valid_dns and col_key == 'dns_name':
             continue
-        
+
         if col_key in COLUMN_SCHEMA:
             header, default_width = COLUMN_SCHEMA[col_key]
             display_column_definitions.append((header, col_key, default_width))
-    
+
     if not display_column_definitions:
         print("Error: No columns are enabled for display.")
         return
-    
+
     # Build all row data first to calculate widths
     all_row_data = []
     for client in clients_data:
@@ -2185,37 +2191,37 @@ def print_clients_table(clients_data: list, enabled_columns: list, is_default_co
         if DEFAULT_DOMAIN and 'dns_name' in row_data:
             row_data['dns_name'] = _strip_default_domain(row_data['dns_name'], DEFAULT_DOMAIN)
         all_row_data.append(row_data)
-    
+
     # Calculate dynamic column widths: max of header and longest data value + 1 space
     max_widths = {}
     for header, col_key, _ in display_column_definitions:
         header_len = len(header)
         data_len = max(len(str(row.get(col_key, "N/A"))) for row in all_row_data) if all_row_data else 0
         max_widths[header] = max(header_len, data_len)
-    
+
     # Add 1 space padding
     final_widths = {h: w + 1 for h, w in max_widths.items()}
-    
+
     # Ensure "Status" and "Locked" have enough space for their values
     if "Status" in final_widths:
         final_widths["Status"] = max(final_widths["Status"], len("Online") + 1)
     if "Locked" in final_widths:
         final_widths["Locked"] = max(final_widths["Locked"], len("Yes") + 1)
-    
+
     # Calculate total width with separators
     separator = " | "
     total_width = sum(final_widths[h] for h, _, _ in display_column_definitions) + (len(display_column_definitions) - 1) * len(separator)
-    
+
     # Print header
     print("-" * total_width)
     header_line = separator.join(f"{header:<{final_widths[header]}}" for header, _, _ in display_column_definitions)
     print(header_line)
     print("-" * total_width)
-    
+
     # Apply multi-level sorting when using +/- column switches (not default columns)
     if not is_default_columns:
         all_row_data.sort(key=lambda row: _get_multi_level_sort_key(row, display_column_definitions), reverse=reverse)
-    
+
     # Print data rows
     for row_data in all_row_data:
         data_line = separator.join(
@@ -2223,7 +2229,7 @@ def print_clients_table(clients_data: list, enabled_columns: list, is_default_co
             for header, key_name, _ in display_column_definitions
         )
         print(data_line)
-    
+
     print("-" * total_width)
 
 def get_sort_key(client: dict, col: str):
@@ -2282,14 +2288,14 @@ def parse_column_switches(args_list: list, column_names: list) -> tuple[list, st
     negative_mode = False
     enabled_cols_explicit = []
     disabled_cols_explicit = []
-    
+
     # Parse ALL column switches to check for mixing and invalid columns
     all_column_switch_args = [
         arg
         for arg in args_list
         if len(arg) > 1 and (arg.startswith('+') or arg.startswith('-'))
     ]
-    
+
     # First pass: check for mixing positive and negative, and validate columns
     for arg in all_column_switch_args:
         col = arg[1:]
@@ -2307,10 +2313,10 @@ def parse_column_switches(args_list: list, column_names: list) -> tuple[list, st
             if col in disabled_cols_explicit:
                 return [], f"Duplicate -column specified: {col}", False
             disabled_cols_explicit.append(col)
-    
+
     if positive_mode and negative_mode:
         return [], "Cannot mix positive (+) and negative (-) switches for column display.", False
-    
+
     if positive_mode:
         if not enabled_cols_explicit:
             return [], "No +columns specified, but positive mode was indicated.", False
@@ -2318,17 +2324,17 @@ def parse_column_switches(args_list: list, column_names: list) -> tuple[list, st
     else:
         # Default behavior: all columns enabled, unless explicitly disabled
         is_default = len(all_column_switch_args) == 0
-        
+
         if is_default and column_names == CLIENT_COLUMN_NAMES:
             # Use predefined default columns for client listing when no switches specified
             enabled_final = DEFAULT_CLIENT_COLUMNS
         else:
             # For other modes or when switches are provided, use all columns minus disabled ones
             enabled_final = [col for col in column_names if col not in disabled_cols_explicit]
-        
+
         if not enabled_final and (negative_mode or not all_column_switch_args):
             return [], "All columns disabled, nothing to show.", False
-        
+
         return enabled_final, None, is_default
 
 def add_filter_arguments(parser):
@@ -2393,7 +2399,7 @@ def add_filter_arguments(parser):
 
 def add_filter_arguments_for_list(parser):
     """Add filtering arguments for list command (supports both clients and APs).
-    
+
     For clients: All standard filters apply.
     For APs: Only --filter_online, --filter_offline, --filter_ip, --filter_mac apply.
     """
@@ -2409,7 +2415,7 @@ def add_filter_arguments_for_list(parser):
         action="store_true",
         help="Filter devices currently offline (clients and APs)."
     )
-    
+
     # Locked status filters (clients only)
     filter_group_locked_status = parser.add_mutually_exclusive_group()
     filter_group_locked_status.add_argument(
@@ -2422,7 +2428,7 @@ def add_filter_arguments_for_list(parser):
         action="store_true",
         help="Filter clients NOT locked to an AP (clients only)."
     )
-    
+
     # IP and MAC filters (works for both clients and APs)
     parser.add_argument(
         "--filter_ip",
@@ -2434,7 +2440,7 @@ def add_filter_arguments_for_list(parser):
         type=str,
         help="Filter devices by MAC address (substring match - clients and APs)."
     )
-    
+
     # DNS and hostname filters (clients only)
     parser.add_argument(
         "--filter_dns_name",
@@ -2446,14 +2452,14 @@ def add_filter_arguments_for_list(parser):
         type=str,
         help="Filter clients by exact hostname match (clients only)."
     )
-    
+
     # SSID filter (clients only)
     parser.add_argument(
         "--filter_by_ssid",
         type=str,
         help="Filter clients by SSID (exact match - clients only)."
     )
-    
+
     # Signal strength filters (clients only)
     parser.add_argument(
         "--filter_signal_above",
@@ -2479,23 +2485,23 @@ if __name__ == "__main__":
     import nss.nss as nss_core
     from pathlib import Path
     import subprocess
-    
+
     nss_db_dir = Path.home() / ".netcon-sync"
-    
+
     # Create NSS database if it doesn't exist
     try:
         ensure_nss_db(nss_db_dir)
     except RuntimeError as e:
         print(f"Error initializing NSS database: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Initialize NSS
     try:
         nss_core.nss_init(str(nss_db_dir))
     except Exception as e:
         print(f"Error initializing NSS: {e}", file=sys.stderr)
         sys.exit(1)
-    
+
     # Check for config errors from import phase
     if _config_error:
         print(f"ERROR: Configuration Error: {_config_error}", file=sys.stderr)
@@ -2506,13 +2512,13 @@ if __name__ == "__main__":
         print("  export UNIFI_SITE_ID='default'  # (optional, defaults to 'default')", file=sys.stderr)
         print("\nThen run your command again.", file=sys.stderr)
         sys.exit(1)
-    
+
     # Reminder about backup before any modifications
     if len(sys.argv) > 1 and sys.argv[1] not in ("--help", "-h", "trust"):
         print("WARNING: Please backup your UniFi configuration before making changes!")
         print("   Use UniFi's built-in backup feature in System Settings > Backup & Restore")
         print()
-    
+
     # Handle "trust" command first (non-standard argument parsing)
     if len(sys.argv) > 1 and sys.argv[1] == "trust":
         if len(sys.argv) < 3:
@@ -2525,10 +2531,10 @@ if __name__ == "__main__":
             print("  # Trust a server certificate (with interactive verification)")
             print("  unifi_climgr.py trust --server https://192.168.1.100:8443")
             sys.exit(1)
-        
+
         # NSS database path for trust operations
         nss_db_dir = Path.home() / ".netcon-sync"
-        
+
         # Parse trust command options
         if sys.argv[2] == "--ca":
             if len(sys.argv) < 4:
@@ -2551,7 +2557,7 @@ if __name__ == "__main__":
                 print(f"ERROR: Invalid trust option: {sys.argv[2]}")
                 print("Use either --ca <CERT_PATH> or --server <HTTPS_URL>")
                 sys.exit(1)
-    
+
     # Separate column switches from other arguments BEFORE passing to argparse
     # Accept CLIENT, AP, and SSID columns, validation happens per-action later
     all_args = sys.argv[1:]
@@ -2559,7 +2565,7 @@ if __name__ == "__main__":
     argparse_args = []
     column_control_args = []
     all_valid_columns = set(CLIENT_COLUMN_NAMES) | set(AP_COLUMN_NAMES) | set(SSID_COLUMN_NAMES)
-    
+
     for arg in all_args:
         is_column_control = False
         if len(arg) > 1 and (arg.startswith('+') or arg.startswith('-')):
@@ -2585,7 +2591,7 @@ AVAILABLE ACTIONS:
                 --ssids                List all wireless networks (SSIDs)
                 --aps                  List all access points with mesh topology tree
               Column Switches: +column, -column (e.g., +mac +hostname -description)
-              
+
               CLIENT COLUMNS (for --clients):
                 number                 Sequential numbering
                 mac                    MAC address
@@ -2608,13 +2614,13 @@ AVAILABLE ACTIONS:
                 locked_ap_name         Name of locked AP
                 locked_ap_mac          MAC of locked AP
                 last_seen              Last seen timestamp
-              
+
               SSID COLUMNS (for --ssids):
                 name                   SSID name
                 enabled                Enabled/Disabled status (Yes/No)
                 security               Security type (Open, WPA, WPA2, WPA3, WPA2/WPA3)
                 band                   Frequency band (2.4GHz, 5GHz, 6GHz, or combinations)
-              
+
               AP COLUMNS (for --aps):
                 name                   AP device name
                 mac                    AP MAC address
@@ -2624,17 +2630,17 @@ AVAILABLE ACTIONS:
                 connection             Connection type (wired/mesh)
                 uplink_ap_name         Name of uplink AP (for mesh)
                 uplink_ap_mac          MAC of uplink AP (for mesh)
-              
+
               CLIENT FILTERS (for --clients):
                 --filter_online, --filter_offline (show online/offline clients)
                 --filter_locked, --filter_unlocked (show locked/unlocked clients)
                 --filter_ip <IP>, --filter_mac <MAC> (exact/substring match)
                 --filter_dns_name <DNS>, --filter_hostname <NAME> (exact match)
                 --filter_signal_above <dBm>, --filter_signal_below <dBm> (signal range)
-              
+
               SSID FILTERS (for --ssids):
                 --filter_name <NAME>   Filter by SSID name (substring match)
-              
+
               AP FILTERS (for --aps):
                 --filter_online, --filter_offline (show online/offline APs)
                 --filter_ip <IP>, --filter_mac <MAC> (substring match)
@@ -2844,7 +2850,7 @@ CERTIFICATE MANAGEMENT:
   ./unifi_climgr.py trust https://192.168.1.100:8443
         """
     )
-    
+
     # Create subparsers for actions
     subparsers = parser.add_subparsers(dest='action', required=False)
 
@@ -2866,18 +2872,18 @@ FILTERS FOR --clients:
   Status Filters (mutually exclusive):
     --filter_online              Show only online clients
     --filter_offline             Show only offline clients
-  
+
   Lock Status Filters (mutually exclusive):
     --filter_locked              Show only clients locked to an AP
     --filter_unlocked            Show only clients NOT locked to an AP
-  
+
   Specific Value Filters:
     --filter_ip <IP>             Exact IP address match
     --filter_mac <MAC>           MAC address substring match
     --filter_dns_name <DNS>      Exact DNS name match
     --filter_hostname <NAME>     Exact hostname match
     --filter_by_ssid <SSID>      SSID exact match
-  
+
   Signal Strength Filters:
     --filter_signal_above <dBm>  Signal strength > dBm (e.g., -60)
     --filter_signal_below <dBm>  Signal strength < dBm (e.g., -30)
@@ -2886,7 +2892,7 @@ FILTERS FOR --aps:
   Status Filters (mutually exclusive):
     --filter_online              Show only online APs
     --filter_offline             Show only offline APs
-  
+
   Specific Value Filters:
     --filter_ip <IP>             Exact IP address match
     --filter_mac <MAC>           MAC address substring match
@@ -2897,7 +2903,7 @@ FILTERS FOR --ssids:
 COLUMN SWITCHES (for --clients, --aps, and --ssids):
   +column                        Include column in output
   -column                        Exclude column from output
-  
+
   Example: list --clients +mac +hostname -description
 
 EXAMPLES:
@@ -2944,7 +2950,7 @@ EXAMPLES:
         type=str,
         help="Filter SSIDs/APs by name (substring match, case-insensitive)."
     )
-    
+
     # Add sorting direction flags
     sort_direction = list_parser.add_mutually_exclusive_group()
     sort_direction.add_argument(
@@ -2992,10 +2998,10 @@ EXAMPLES:
 EXAMPLES:
   # Reconnect all online clients (batch mode, no delay)
   ./unifi_climgr.py reconnect_client --filter_online
-  
+
   # Reconnect all online clients with 1 second delay between each
   ./unifi_climgr.py reconnect_client --filter_online --delay 1000
-  
+
   # Reconnect clients on specific SSID with 500ms delay
   ./unifi_climgr.py reconnect_client --filter_by_ssid "MyNetwork" --delay 500
         """
@@ -3168,17 +3174,17 @@ EXAMPLES:
 EXAMPLES:
   # Collect logs from all APs (default: unlimited parallelism)
   ./unifi_climgr.py collect_ap_logs
-  
+
   # Collect logs with limited parallelism
   ./unifi_climgr.py collect_ap_logs --parallel 5
-  
+
   # Collect logs to specific directory
   ./unifi_climgr.py collect_ap_logs --output /tmp/ap_logs
-  
+
   # Collect only from specific APs
   ./unifi_climgr.py collect_ap_logs --filter-name "Office"
   ./unifi_climgr.py collect_ap_logs --filter-ip "192.168.1"
-  
+
   # Skip controller support file collection
   ./unifi_climgr.py collect_ap_logs --no-controller
         """
@@ -3230,12 +3236,12 @@ EXAMPLES:
 
     # Parse arguments
     args = parser.parse_args(argparse_args)
-    
+
     # If no action provided, show help
     if not args.action:
         parser.print_help()
         sys.exit(0)
-    
+
     # Validate that --clients is provided for client-related actions
     # (but not for lock_client, unlock_client, reconnect_client, enable, disable, add, restart which have different requirements)
     client_actions_needing_flag = ['forget', 'block', 'unblock']
@@ -3254,7 +3260,7 @@ EXAMPLES:
     else:
         # For action commands, default to client columns (but not really used for display)
         mode_column_names = CLIENT_COLUMN_NAMES
-    
+
     # Handle column switches
     enabled_columns, err, is_default_columns = parse_column_switches(column_control_args, mode_column_names)
     if err:
@@ -3282,12 +3288,12 @@ EXAMPLES:
                 if not aps:
                     print("No Access Points found.")
                     sys.exit(0)
-                
+
                 # Apply AP filters
                 filtered_aps = []
                 for ap in aps:
                     match = True
-                    
+
                     # Status filters (online/offline)
                     if hasattr(args, 'filter_online') and args.filter_online:
                         if not ap.get("adoptable_when_online", ap.get("state") == "online"):
@@ -3295,40 +3301,40 @@ EXAMPLES:
                     elif hasattr(args, 'filter_offline') and args.filter_offline:
                         if ap.get("adoptable_when_online", ap.get("state") == "online"):
                             match = False
-                    
+
                     # IP filter
                     if hasattr(args, 'filter_ip') and args.filter_ip:
                         ap_ip = ap.get("ip", "")
                         if args.filter_ip.lower() not in ap_ip.lower():
                             match = False
-                    
+
                     # MAC filter
                     if hasattr(args, 'filter_mac') and args.filter_mac:
                         ap_mac = ap.get("mac", "")
                         if args.filter_mac.lower() not in ap_mac.lower():
                             match = False
-                    
+
                     # Name filter (substring match, case-insensitive)
                     if hasattr(args, 'filter_name') and args.filter_name:
                         ap_name = ap.get("name", "")
                         if args.filter_name.lower() not in ap_name.lower():
                             match = False
-                    
+
                     if match:
                         filtered_aps.append(ap)
-                
+
                 if not filtered_aps:
                     print("No Access Points found matching the specified filters.")
                     sys.exit(0)
-                
+
                 print(f"\nFound {len(filtered_aps)} Access Point(s):")
                 reverse = getattr(args, 'descending', False)
                 print_ap_table(filtered_aps, all_devices, enabled_columns, reverse)
-                
+
                 # Determine whether to show tree view for filtered APs
                 show_tree = False
                 tree_aps = filtered_aps
-                
+
                 if len(filtered_aps) == 1:
                     # Single AP: show tree only if it's mesh, showing only the branch to that AP
                     ap = filtered_aps[0]
@@ -3345,7 +3351,7 @@ EXAMPLES:
                     if has_mesh:
                         show_tree = True
                         tree_aps = [d for d in all_devices if d.get("type") == "uap"]  # Use all APs for tree
-                
+
                 if show_tree:
                     display_ap_tree(tree_aps, all_devices)
             elif args.ssids:
@@ -3354,25 +3360,25 @@ EXAMPLES:
                 if not ssids:
                     print("No SSIDs found.")
                     sys.exit(0)
-                
+
                 # Apply SSID filters
                 filtered_ssids = []
                 for ssid in ssids:
                     match = True
-                    
+
                     # Name filter (substring match, case-insensitive)
                     if hasattr(args, 'filter_name') and args.filter_name:
                         ssid_name = ssid.get("name", "")
                         if args.filter_name.lower() not in ssid_name.lower():
                             match = False
-                    
+
                     if match:
                         filtered_ssids.append(ssid)
-                
+
                 if not filtered_ssids:
                     print("No SSIDs found matching the specified filters.")
                     sys.exit(0)
-                
+
                 print(f"\nFound {len(filtered_ssids)} SSID(s):")
                 if enabled_columns:
                     reverse = getattr(args, 'descending', False)
@@ -3384,54 +3390,54 @@ EXAMPLES:
                 if not clients:
                     print("No clients found.")
                     sys.exit(0)
-                
+
                 # Add "number" key for numbering (before filtering)
                 for i, client in enumerate(clients):
                     client["number"] = i + 1
-                
+
                 # Apply client filters
                 filtered_clients = []
                 for client in clients:
                     match = True
-                    
+
                     # Status filters (online/offline)
                     if hasattr(args, 'filter_online') and args.filter_online and not client.get("is_connected_live", False):
                         match = False
                     elif hasattr(args, 'filter_offline') and args.filter_offline and client.get("is_connected_live", False):
                         match = False
-                    
+
                     # Lock status filters
                     if hasattr(args, 'filter_locked') and args.filter_locked and not client.get("is_ap_locked", False):
                         match = False
                     elif hasattr(args, 'filter_unlocked') and args.filter_unlocked and client.get("is_ap_locked", False):
                         match = False
-                    
+
                     # IP filter
                     if hasattr(args, 'filter_ip') and args.filter_ip:
                         if client.get("display_ip") != args.filter_ip:
                             match = False
-                    
+
                     # MAC filter
                     if hasattr(args, 'filter_mac') and args.filter_mac:
                         client_mac = client.get("mac", "")
                         if args.filter_mac.lower() not in client_mac.lower():
                             match = False
-                    
+
                     # DNS name filter
                     if hasattr(args, 'filter_dns_name') and args.filter_dns_name:
                         if client.get("dns_name") != args.filter_dns_name:
                             match = False
-                    
+
                     # Hostname filter
                     if hasattr(args, 'filter_hostname') and args.filter_hostname:
                         if client.get("hostname") != args.filter_hostname:
                             match = False
-                    
+
                     # SSID filter
                     if hasattr(args, 'filter_by_ssid') and args.filter_by_ssid:
                         if client.get("live_ssid") != args.filter_by_ssid:
                             match = False
-                    
+
                     # Signal strength filters
                     if hasattr(args, 'filter_signal_above') and args.filter_signal_above is not None:
                         signal = client.get("live_signal")
@@ -3441,24 +3447,24 @@ EXAMPLES:
                         signal = client.get("live_signal")
                         if not client.get("is_connected_live", False) or signal is None or signal >= args.filter_signal_below:
                             match = False
-                    
+
                     if match:
                         filtered_clients.append(client)
-                
+
                 if not filtered_clients:
                     print("No clients found matching the specified filters.")
                     sys.exit(0)
-                
+
                 # Re-number filtered clients
                 for i, client in enumerate(filtered_clients):
                     client["number"] = i + 1
-                
+
                 print(f"\nFound {len(filtered_clients)} Client(s):")
                 if enabled_columns:
                     reverse = getattr(args, 'descending', False)
                     print_clients_table(filtered_clients, enabled_columns, is_default_columns, reverse)
             sys.exit(0)
-        
+
         # =====================================================================
         # ADD action
         # =====================================================================
@@ -3472,7 +3478,7 @@ EXAMPLES:
             else:
                 print(f"Failed to add/update client {mac_to_add}. Check logs for details.")
             sys.exit(0)
-        
+
         # =====================================================================
         # RESTART action
         # =====================================================================
@@ -3480,13 +3486,13 @@ EXAMPLES:
             print("Fetching UniFi devices...")
             all_devices = unifi_utils.get_devices()
             aps = [device for device in all_devices if device.get("type") == "uap"]
-            
+
             if not aps:
                 print("No Access Points found.")
                 sys.exit(0)
-            
+
             aps_to_restart = []
-            
+
             if args.ap_mac:
                 # Restart specific AP by MAC
                 target_mac = args.ap_mac.lower()
@@ -3505,77 +3511,109 @@ EXAMPLES:
             else:
                 # Restart all APs
                 aps_to_restart = aps
-            
+
             # Display the mesh topology before restarting (only if more than one AP)
             if len(aps_to_restart) > 1:
                 print()
                 display_ap_tree(aps_to_restart, all_devices)
-            
+
             # Check if there are any mesh APs (depth >= 1)
             depths = calculate_ap_mesh_depths(aps_to_restart)
             has_mesh_aps = any(depth >= 1 for depth in depths.values())
-            
+
             # Use mesh-ordered restart if there are mesh APs and we're restarting all APs (not a specific one)
             use_mesh_order = (has_mesh_aps and not args.ap_mac and not args.ap_name)
-            
+
             if use_mesh_order and not args.ap_mac and not args.ap_name:
                 import time
                 print(f"\nRestarting {len(aps_to_restart)} AP(s) in mesh order (leaf to parent)...\n")
-                
+
                 # Group APs by depth
                 aps_by_depth = defaultdict(list)
                 for ap in aps_to_restart:
                     ap_mac = ap.get("mac")
                     depth = depths.get(ap_mac, -1)
                     aps_by_depth[depth].append(ap)
-                
+
                 # Sort depths (deepest/highest numbers first, which means leaf to parent)
                 sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
-                
+
                 for i, depth in enumerate(sorted_depths):
                     layer_aps = aps_by_depth[depth]
-                    
+
                     if depth == -1:
                         depth_label = "Orphan"
                     elif depth == 0:
                         depth_label = "Wired Root"
                     else:
                         depth_label = f"Mesh Depth {depth}"
-                    
                     print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
-                    
                     for ap in layer_aps:
                         ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                         ap_mac = ap.get("mac")
+                        ap_ip = ap.get("ip")
                         if ap_mac:
                             print(f"  {ap_name}... ", end="", flush=True)
-                            if unifi_utils.restart_ap(ap_mac):
-                                print("[OK]")
+                            result = unifi_utils.restart_ap(ap_mac)
+                            if result['success']:
+                                print(f"[OK] via {result['method']}")
                             else:
-                                print("[FAIL]")
-                    
+                                # Try SSH fallback
+                                print(f"[FAIL] via controller ({result.get('error', 'unknown error')})")
+                                if ap_ip:
+                                    print(f"    Trying SSH fallback to {ap_ip}... ", end="", flush=True)
+                                    # Get SSH credentials if not already retrieved
+                                    if 'ssh_username' not in locals():
+                                        ssh_username, ssh_password = get_ssh_credentials()
+                                    if ssh_username and ssh_password:
+                                        ssh_result = unifi_utils.restart_ap_via_ssh(ap_ip, ssh_username, ssh_password)
+                                        if ssh_result['success']:
+                                            print(f"[OK] via {ssh_result['method']}")
+                                        else:
+                                            print(f"[FAIL] {ssh_result.get('error', 'unknown error')}")
+                                    else:
+                                        print("[FAIL] No SSH credentials available")
+                                else:
+                                    print(f"    No IP address available for SSH fallback")
                     # Add 15-second delay between layers (but not after the last layer)
                     if i < len(sorted_depths) - 1:
                         print("  Waiting 15 seconds before next layer...\n")
                         time.sleep(15)
-                
                 print("\nAll APs restarted in mesh order.")
             else:
                 # Standard restart without mesh ordering
-                
                 print(f"\nRestarting {len(aps_to_restart)} AP(s)...")
+                # Get SSH credentials once if needed for fallback
+                ssh_username, ssh_password = None, None
                 for ap in aps_to_restart:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     ap_mac = ap.get("mac")
+                    ap_ip = ap.get("ip")
                     if ap_mac:
-                        print(f"  {ap_name}... ", end="")
-                        if unifi_utils.restart_ap(ap_mac):
-                            print("[OK]")
+                        print(f"  {ap_name}... ", end="", flush=True)
+                        result = unifi_utils.restart_ap(ap_mac)
+                        if result['success']:
+                            print(f"[OK] via {result['method']}")
                         else:
-                            print("[FAIL]")
-            
+                            # Try SSH fallback
+                            print(f"[FAIL] via controller ({result.get('error', 'unknown error')})")
+                            if ap_ip:
+                                print(f"    Trying SSH fallback to {ap_ip}... ", end="", flush=True)
+                                # Get SSH credentials on first fallback attempt
+                                if ssh_username is None:
+                                    ssh_username, ssh_password = get_ssh_credentials()
+                                if ssh_username and ssh_password:
+                                    ssh_result = unifi_utils.restart_ap_via_ssh(ap_ip, ssh_username, ssh_password)
+                                    if ssh_result['success']:
+                                        print(f"[OK] via {ssh_result['method']}")
+                                    else:
+                                        print(f"[FAIL] {ssh_result.get('error', 'unknown error')}")
+                                else:
+                                    print("[FAIL] No SSH credentials available")
+                            else:
+                                print(f"    No IP address available for SSH fallback")
             sys.exit(0)
-        
+
         # =====================================================================
         # UPGRADE_AP action
         # =====================================================================
@@ -3583,13 +3621,13 @@ EXAMPLES:
             print("Fetching UniFi devices...")
             all_devices = unifi_utils.get_devices()
             aps = [device for device in all_devices if device.get("type") == "uap"]
-            
+
             if not aps:
                 print("No Access Points found.")
                 sys.exit(0)
-            
+
             aps_to_upgrade = []
-            
+
             if args.ap_mac:
                 # Upgrade specific AP by MAC
                 target_mac = args.ap_mac.lower()
@@ -3608,7 +3646,7 @@ EXAMPLES:
             else:
                 # Upgrade all APs
                 aps_to_upgrade = aps
-            
+
             # Run pre-upgrade health check (always run to detect already-upgrading APs)
             already_upgrading_aps = []  # Initialize to empty
             health_result = unifi_utils.check_ap_health_before_upgrade(aps_to_upgrade)
@@ -3617,50 +3655,50 @@ EXAMPLES:
                 print(f"\nTo proceed, wait for the AP(s) to complete initialization, then try again.")
                 sys.exit(1)
             print(health_result['message'])
-            
+
             already_upgrading_aps = health_result['already_upgrading']
             # Use only ready APs for upgrade (already upgrading ones will be monitored but not re-initiated)
             aps_to_upgrade = health_result['ready_aps']
-            
+
             if not aps_to_upgrade and not already_upgrading_aps:
                 print("Error: No APs ready for upgrade")
                 sys.exit(1)
-            
+
             if already_upgrading_aps:
                 if args.actual_upgrade:
                     print(f"\nNote: {len(already_upgrading_aps)} AP(s) already upgrading, monitoring only")
                 # Add already upgrading APs back to the full list for monitoring, but not for initiation
                 # We'll track them separately in the upgrade process
-            
+
             # Display the mesh topology before upgrading (only if more than one AP)
             # Show topology of all APs (ready + already upgrading)
             aps_for_tree_display = aps_to_upgrade + already_upgrading_aps
             if len(aps_for_tree_display) > 1:
                 display_ap_tree(aps_for_tree_display, all_devices)
-            
+
             # Check if there are any mesh APs (depth >= 1)
             # Calculate depths for ALL APs (ready + already upgrading) so we don't mark upgrading APs as orphans
             all_aps_for_depth = aps_to_upgrade + already_upgrading_aps
             depths = calculate_ap_mesh_depths(all_aps_for_depth)
             has_mesh_aps = any(depth >= 1 for depth in depths.values())
-            
+
             # Use mesh-ordered upgrade if there are mesh APs and we're upgrading all APs (not a specific one)
             use_mesh_order = (has_mesh_aps and not args.ap_mac and not args.ap_name)
-            
+
             dry_run = not args.actual_upgrade  # Default is dry run
             mode_str = "[ACTUAL]" if args.actual_upgrade else "[DRY RUN]"
-            
+
             # Initialize upgrade tracking (unified for both mesh and standard paths)
             import time
             from datetime import datetime
-            
+
             upgrade_session_start = time.time()
             start_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            
+
             # Track APs being upgraded (MAC -> target version -> initiation_time)
             aps_upgrading = {}
             ap_initiation_times = {}
-            
+
             # Pre-populate with already upgrading APs (so they get monitored regardless of path)
             for ap in already_upgrading_aps:
                 ap_mac = ap.get("mac")
@@ -3673,7 +3711,7 @@ EXAMPLES:
                     }
                     # Use current time as initiation (they started before this script)
                     ap_initiation_times[ap_mac] = time.time()
-            
+
             if use_mesh_order and not args.ap_mac and not args.ap_name:
                 # Print message including already upgrading APs
                 if already_upgrading_aps:
@@ -3682,11 +3720,11 @@ EXAMPLES:
                     print(f"\n{mode_str} Initiating firmware upgrades for {len(aps_to_upgrade)} AP(s) in mesh order (leaf to parent)...")
                 print(f"Started at: {start_time_str}\n")
                 print("Note: Upgrades are queued and will be processed by the APs. Monitoring progress...\n")
-                
+
                 # Group APs by depth (include both ready_aps and already_upgrading_aps for display)
                 aps_by_depth = defaultdict(list)
                 already_upgrading_macs = {ap.get("mac") for ap in already_upgrading_aps if ap.get("mac")}
-                
+
                 # Pre-populate aps_upgrading dict with already-upgrading APs so they're monitored
                 # Get fresh device data to get target versions
                 all_devices_for_target = unifi_utils.get_devices()
@@ -3694,16 +3732,16 @@ EXAMPLES:
                 for device in all_devices_for_target:
                     if device.get("type") == "uap":
                         device_map_for_target[device.get("mac", "").lower()] = device
-                
+
                 for ap in already_upgrading_aps:
                     ap_mac = ap.get("mac")
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     current_version = unifi_utils.get_ap_current_version(ap_mac)
-                    
+
                     # Get target version from device data
                     device = device_map_for_target.get(ap_mac.lower())
                     target_version = device.get("upgrade_to_firmware", "Unknown") if device else "Unknown"
-                    
+
                     aps_upgrading[ap_mac] = {
                         "name": ap_name,
                         "target_version": target_version,
@@ -3711,30 +3749,30 @@ EXAMPLES:
                     }
                     # Use current time as start time for already-upgrading APs
                     ap_initiation_times[ap_mac] = time.time()
-                
+
                 for ap in aps_to_upgrade + already_upgrading_aps:
                     ap_mac = ap.get("mac")
                     depth = depths.get(ap_mac, -1)
                     aps_by_depth[depth].append(ap)
-                
+
                 # Sort depths (deepest/highest numbers first, which means leaf to parent)
                 sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
-                
+
                 for i, depth in enumerate(sorted_depths):
                     layer_aps = aps_by_depth[depth]
-                    
+
                     if depth == -1:
                         depth_label = "Orphan"
                     elif depth == 0:
                         depth_label = "Wired Root"
                     else:
                         depth_label = f"Mesh Depth {depth}"
-                    
+
                     print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
-                    
+
                     # Track if any AP in this layer is actually being upgraded
                     layer_has_upgrade = False
-                    
+
                     # Issue upgrade commands to all APs in this layer (concurrent upgrades)
                     for ap in layer_aps:
                         ap_name = ap.get("name") or ap.get("model", "Unknown AP")
@@ -3744,13 +3782,13 @@ EXAMPLES:
                             if ap_mac in aps_upgrading:
                                 print(f"  {ap_name}... [ALREADY UPGRADING]")
                                 continue
-                            
+
                             result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=dry_run)
                             if result['success']:
                                 current = result.get('current_version', 'Unknown')
                                 new = result.get('new_version', 'Unknown')
                                 print(f"  {ap_name}... ", end="", flush=True)
-                                
+
                                 # Check if upgrade is already in progress externally (skip_initiation flag)
                                 if result.get('skip_initiation'):
                                     print(f"[MONITORING] Already upgrading externally")
@@ -3763,23 +3801,23 @@ EXAMPLES:
                                         ap_initiation_times[ap_mac] = time.time()
                                         layer_has_upgrade = True
                                     continue
-                                
+
                                 if result.get('new_version') and result['current_version'] != result['new_version']:
                                     if dry_run:
                                         print(f"[UPGRADABLE] {current} -> {new}")
                                     else:
                                         # Get initial state before the upgrade was initiated
                                         initial_state = unifi_utils.get_ap_state(ap_mac)
-                                        
+
                                         command_issue_time = time.time()
                                         initiation_time_str = datetime.now().strftime("%H:%M:%S")
                                         print(f"[INITIATING] {current} -> {new} at {initiation_time_str}")
-                                        
+
                                         # Verify upgrade state change - with retry if initial attempt fails
                                         verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
                                         upgrade_success = False
                                         actual_start_time = None
-                                        
+
                                         if verify_result['success']:
                                             print(f"  [OK] Upgrade detected: {verify_result['message']}\n", flush=True)
                                             upgrade_success = True
@@ -3800,7 +3838,7 @@ EXAMPLES:
                                                     print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n", flush=True)
                                             else:
                                                 print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n", flush=True)
-                                        
+
                                         # Only track if upgrade was successful
                                         if upgrade_success:
                                             aps_upgrading[ap_mac] = {
@@ -3814,11 +3852,11 @@ EXAMPLES:
                                     print(f"(already latest)")
                             else:
                                 print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
-                    
+
                     # Add configurable delay between layers (but not after the last layer or in dry run mode)
                     if i < len(sorted_depths) - 1 and not dry_run and layer_has_upgrade:
                         pass  # No delay between layers for speed
-                
+
                 # Monitor upgrade progress (only in actual mode and if we have APs to monitor)
                 if not dry_run and aps_upgrading:
                     print(f"\n{'='*80}")
@@ -3826,8 +3864,9 @@ EXAMPLES:
                     timeout_minutes = args.upgrade_timeout // 60
                     print(f"Checking every 5 seconds. Timeout: {timeout_minutes} minute(s)")
                     print(f"{'='*80}\n")
-                    
+
                     completed_aps = {}  # MAC -> completion_time
+                    failed_aps = set()  # Set of MAC addresses that failed to upgrade
                     ap_states = {}  # MAC -> last known state (to detect reversions)
                     retry_count = {}  # MAC -> number of retries
                     reversion_times = {}  # MAC -> time when reversion was first detected
@@ -3839,11 +3878,11 @@ EXAMPLES:
                     no_progress_displayed = False
                     max_retries = 2  # Maximum number of retries per AP
                     retry_delay_seconds = 30  # Wait 30 seconds before retrying after a reversion
-                    
+
                     while len(completed_aps) < len(aps_upgrading):
                         elapsed = time.time() - monitoring_start
                         time_since_progress = time.time() - last_progress_time
-                        
+
                         # Check timeout
                         if elapsed > timeout_seconds:
                             print(f"\n[TIME]  Upgrade monitoring timeout ({timeout_minutes} minute(s) elapsed)")
@@ -3854,14 +3893,14 @@ EXAMPLES:
                                     ap_info = aps_upgrading[ap_mac]
                                     print(f"  - {ap_info['name']}: {ap_info['target_version']}")
                             break
-                        
+
                         # Check each AP's current version for completion
                         for ap_mac in list(aps_upgrading.keys()):
                             if ap_mac not in completed_aps:
                                 ap_info = aps_upgrading[ap_mac]
                                 current_version = unifi_utils.get_ap_current_version(ap_mac)
                                 current_state = unifi_utils.get_ap_state(ap_mac)
-                                
+
                                 # Detect state reversion: UPGRADING -> UPGRADABLE (upgrade dropped without progress)
                                 if ap_mac in ap_states:
                                     prev_state = ap_states[ap_mac]
@@ -3869,7 +3908,7 @@ EXAMPLES:
                                         # First time detecting this reversion
                                         if ap_mac not in reversion_times:
                                             reversion_times[ap_mac] = time.time()
-                                        
+
                                         # Check if enough time has passed to retry
                                         time_since_reversion = time.time() - reversion_times[ap_mac]
                                         if time_since_reversion >= retry_delay_seconds:
@@ -3877,7 +3916,7 @@ EXAMPLES:
                                             if retries < max_retries:
                                                 retry_count[ap_mac] = retries + 1
                                                 print(f"[RETRY] {ap_info['name']}: Retrying upgrade (attempt {retries + 1}/{max_retries})", flush=True)
-                                                
+
                                                 # Retry the upgrade
                                                 result = unifi_utils.upgrade_ap_firmware(ap_mac, skip_health_check=True)
                                                 if result['success']:
@@ -3888,40 +3927,42 @@ EXAMPLES:
                                                 else:
                                                     print(f"[FAIL] {ap_info['name']}: Retry failed - {result.get('message', 'Unknown error')}", flush=True)
                                                     completed_aps[ap_mac] = time.time()
+                                                    failed_aps.add(ap_mac)
                                             else:
                                                 print(f"[FAIL] {ap_info['name']}: Upgrade dropped by controller and max retries ({max_retries}) exceeded", flush=True)
                                                 completed_aps[ap_mac] = time.time()
-                                
+                                                failed_aps.add(ap_mac)
+
                                 # Track current state
                                 ap_states[ap_mac] = current_state
-                                
+
                                 # Check if upgrade completed
                                 if current_version == ap_info['target_version']:
                                     completion_time = time.time()
                                     completed_aps[ap_mac] = completion_time
                                     last_progress_time = completion_time
                                     no_progress_displayed = False
-                                    
+
                                     # Calculate duration
                                     initiation_time = ap_initiation_times.get(ap_mac, completion_time)
                                     duration_seconds = completion_time - initiation_time
                                     duration_minutes = int(duration_seconds // 60)
                                     duration_secs = int(duration_seconds % 60)
-                                    
+
                                     completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                                     print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)", flush=True)
-                                
+
                                 # Check if upgrade is actively progressing
                                 elif unifi_utils.is_ap_actively_upgrading(ap_mac):
                                     # Update progress time - active upgrade is progressing
                                     last_progress_time = time.time()
                                     no_progress_displayed = False
-                        
+
                         # Check for stalled upgrades - if no progress for 60 seconds, report failure
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
                             no_progress_displayed = True
                             print(f"\n[FAIL] No progress detected in last 60 seconds. The following APs failed to upgrade:\n")
-                            
+
                             stalled_aps = []
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
@@ -3930,14 +3971,16 @@ EXAMPLES:
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
                                     current_version = unifi_utils.get_ap_current_version(ap_mac)
                                     is_actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac)
-                                    
+
                                     # Report as failed if version hasn't changed and upgrade is NOT actively in progress
                                     # (Even if upgrade_to_firmware is queued, if it hasn't started after 60s, it failed)
                                     if current_version == ap_info['current_version'] and not is_actively_upgrading:
                                         print(f"  {ap_info['name']}: {current_version} (stuck at {state_desc}) - upgrade failed to start")
                                         stalled_aps.append(ap_mac)
                                         completed_aps[ap_mac] = time.time()  # Mark as "done" so we stop monitoring it
-                            
+                                        failed_aps.add(ap_mac)
+                                        failed_aps.add(ap_mac)
+
                             if not stalled_aps:
                                 # False alarm - APs are actually progressing, just slowly
                                 no_progress_displayed = False
@@ -3947,29 +3990,30 @@ EXAMPLES:
                                 active_aps = [mac for mac in aps_upgrading if mac not in completed_aps]
                                 if active_aps:
                                     print(f"\nContinuing to monitor {len(active_aps)} AP(s) still upgrading...\n")
-                        
+
                         # Show progress countdown
                         if time_since_progress > no_progress_threshold and no_progress_displayed:
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
                             remaining_seconds = int(remaining_timeout % 60)
                             print(f"[WAIT] {remaining_minutes}m:{remaining_seconds:02d}s until timeout...", flush=True)
-                        
+
                         # If all APs upgraded, exit
                         if len(completed_aps) == len(aps_upgrading):
-                            print(f"\n[SUCCESS] All {len(completed_aps)} AP(s) upgraded successfully!")
+                            successful_count = len(completed_aps) - len(failed_aps)
+                            if failed_aps:
+                                print(f"\n[PARTIAL] {successful_count} of {len(aps_upgrading)} AP(s) upgraded successfully, {len(failed_aps)} failed.")
+                            else:
+                                print(f"\n[SUCCESS] All {len(completed_aps)} AP(s) upgraded successfully!")
                             break
-                        
                         # Sleep before next check
                         time.sleep(check_interval)
-                
                 # Display total execution time
                 upgrade_session_end = time.time()
                 total_duration = upgrade_session_end - upgrade_session_start
                 total_minutes = int(total_duration // 60)
                 total_seconds = int(total_duration % 60)
                 print(f"\nTotal execution time: {total_minutes}m:{total_seconds:02d}s")
-            
             else:
                 # Standard upgrade without mesh ordering
                 # Print message including already upgrading APs
@@ -3979,7 +4023,7 @@ EXAMPLES:
                     print(f"\n{mode_str} Upgrading {len(aps_to_upgrade)} AP(s)...")
                 print(f"Started at: {start_time_str}\n")
                 print("Note: Upgrades are queued and will be processed by the APs. Monitoring progress...\n")
-                
+
                 for ap in aps_to_upgrade:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     ap_mac = ap.get("mac")
@@ -3988,7 +4032,6 @@ EXAMPLES:
                         if ap_mac in aps_upgrading:
                             print(f"  {ap_name}... [OK] Already queued for upgrade\n")
                             continue
-                        
                         # First, check if upgrade is already in progress
                         print(f"  {ap_name}... ", end="", flush=True)
                         ap_already_upgrading = False
@@ -3997,7 +4040,7 @@ EXAMPLES:
                             for device in devices:
                                 if device.get("mac", "").lower() == ap_mac.lower():
                                     upgrade_progress = device.get("upgrade_progress")
-                                    
+
                                     # Check if upgrade is already active (only upgrade_progress is reliable)
                                     if upgrade_progress and upgrade_progress > 0:
                                         print(f"[OK] Upgrade already in progress (detected from controller)\n")
@@ -4014,16 +4057,15 @@ EXAMPLES:
                                     break
                         except Exception as e:
                             pass
-                        
                         if ap_already_upgrading:
                             continue
-                        
+
                         # If not already upgrading, proceed with upgrade command
                         result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=dry_run)
                         if result['success']:
                             current = result.get('current_version', 'Unknown')
                             new = result.get('new_version', 'Unknown')
-                            
+
                             # Check if upgrade is already in progress externally (skip_initiation flag)
                             if result.get('skip_initiation'):
                                 print(f"[MONITORING] Already upgrading externally\n")
@@ -4035,23 +4077,21 @@ EXAMPLES:
                                     }
                                     ap_initiation_times[ap_mac] = time.time()
                                 continue
-                            
+
                             if result.get('new_version') and result['current_version'] != result['new_version']:
                                 if dry_run:
                                     print(f"[UPGRADABLE] {current} -> {new}")
                                 else:
-                                    # Get initial state before the upgrade was initiated
-                                    initial_state = unifi_utils.get_ap_state(ap_mac)
-                                    
+                                    # Get initial state before the upgrade was initiatedinitial_state = unifi_utils.get_ap_state(ap_mac)
+
                                     command_issue_time = time.time()
                                     initiation_time_str = datetime.now().strftime("%H:%M:%S")
                                     print(f"[INITIATING] {current} -> {new} at {initiation_time_str}")
-                                    
+
                                     # Verify upgrade state change - with one retry if initial attempt fails
                                     verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, initial_state)
                                     upgrade_success = False
                                     actual_start_time = None
-                                    
                                     if verify_result['success']:
                                         print(f"  [OK] Upgrade detected: {verify_result['message']}\n", flush=True)
                                         upgrade_success = True
@@ -4072,7 +4112,7 @@ EXAMPLES:
                                                 print(f"  [FAIL] Upgrade failed to start even after retry. Skipping this AP.\n", flush=True)
                                         else:
                                             print(f"  [FAIL] Failed to retry upgrade: {retry_result.get('message', 'Unknown error')}. Skipping this AP.\n", flush=True)
-                                    
+
                                     # Only track if upgrade was successful
                                     if upgrade_success:
                                         aps_upgrading[ap_mac] = {
@@ -4085,11 +4125,11 @@ EXAMPLES:
                                 print(f"(already latest)")
                         else:
                             print(f"  {ap_name}... [FAIL] {result.get('message', 'Unknown error')}")
-                        
+
                         # Add configurable delay after each upgrade initiation in actual mode (only if upgrade was attempted and successful)
                         if not dry_run and result.get('success') and result.get('new_version') and result['current_version'] != result['new_version']:
                             time.sleep(args.ap_upgrade_delay)
-                
+
                 # Monitor upgrade progress (only in actual mode and if we have APs to monitor)
                 if not dry_run and aps_upgrading:
                     print(f"\n{'='*80}")
@@ -4097,8 +4137,9 @@ EXAMPLES:
                     timeout_minutes = args.upgrade_timeout // 60
                     print(f"Checking every 5 seconds. Timeout: {timeout_minutes} minute(s)")
                     print(f"{'='*80}\n")
-                    
+
                     completed_aps = {}  # MAC -> completion_time
+                    failed_aps = set()  # Set of MAC addresses that failed to upgrade
                     ap_states = {}  # MAC -> last known state (to detect reversions)
                     retry_count = {}  # MAC -> number of retries
                     reversion_times = {}  # MAC -> time when reversion was first detected
@@ -4110,11 +4151,11 @@ EXAMPLES:
                     no_progress_displayed = False
                     max_retries = 2  # Maximum number of retries per AP
                     retry_delay_seconds = 30  # Wait 30 seconds before retrying after a reversion
-                    
+
                     while len(completed_aps) < len(aps_upgrading):
                         elapsed = time.time() - monitoring_start
                         time_since_progress = time.time() - last_progress_time
-                        
+
                         # Check timeout
                         if elapsed > timeout_seconds:
                             print(f"\n[TIME]  Upgrade monitoring timeout ({timeout_minutes} minute(s) elapsed)")
@@ -4125,14 +4166,14 @@ EXAMPLES:
                                     ap_info = aps_upgrading[ap_mac]
                                     print(f"  - {ap_info['name']}: {ap_info['target_version']}")
                             break
-                        
+
                         # Check each AP's current version for completion
                         for ap_mac in list(aps_upgrading.keys()):
                             if ap_mac not in completed_aps:
                                 ap_info = aps_upgrading[ap_mac]
                                 current_version = unifi_utils.get_ap_current_version(ap_mac)
                                 current_state = unifi_utils.get_ap_state(ap_mac)
-                                
+
                                 # Detect state reversion: UPGRADING -> UPGRADABLE (upgrade dropped without progress)
                                 if ap_mac in ap_states:
                                     prev_state = ap_states[ap_mac]
@@ -4140,7 +4181,7 @@ EXAMPLES:
                                         # First time detecting this reversion
                                         if ap_mac not in reversion_times:
                                             reversion_times[ap_mac] = time.time()
-                                        
+
                                         # Check if enough time has passed to retry
                                         time_since_reversion = time.time() - reversion_times[ap_mac]
                                         if time_since_reversion >= retry_delay_seconds:
@@ -4148,7 +4189,7 @@ EXAMPLES:
                                             if retries < max_retries:
                                                 retry_count[ap_mac] = retries + 1
                                                 print(f"[RETRY] {ap_info['name']}: Retrying upgrade (attempt {retries + 1}/{max_retries})", flush=True)
-                                                
+
                                                 # Retry the upgrade
                                                 result = unifi_utils.upgrade_ap_firmware(ap_mac, skip_health_check=True)
                                                 if result['success']:
@@ -4159,40 +4200,42 @@ EXAMPLES:
                                                 else:
                                                     print(f"[FAIL] {ap_info['name']}: Retry failed - {result.get('message', 'Unknown error')}", flush=True)
                                                     completed_aps[ap_mac] = time.time()
+                                                    failed_aps.add(ap_mac)
                                             else:
                                                 print(f"[FAIL] {ap_info['name']}: Upgrade dropped by controller and max retries ({max_retries}) exceeded", flush=True)
                                                 completed_aps[ap_mac] = time.time()
-                                
+                                                failed_aps.add(ap_mac)
+
                                 # Track current state
                                 ap_states[ap_mac] = current_state
-                                
+
                                 # Check if upgrade completed
                                 if current_version == ap_info['target_version']:
                                     completion_time = time.time()
                                     completed_aps[ap_mac] = completion_time
                                     last_progress_time = completion_time
                                     no_progress_displayed = False
-                                    
+
                                     # Calculate duration
                                     initiation_time = ap_initiation_times.get(ap_mac, completion_time)
                                     duration_seconds = completion_time - initiation_time
                                     duration_minutes = int(duration_seconds // 60)
                                     duration_secs = int(duration_seconds % 60)
-                                    
+
                                     completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                                     print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)", flush=True)
-                                
+
                                 # Check if upgrade is actively progressing (upgrade_progress > 0)
                                 elif unifi_utils.is_ap_actively_upgrading(ap_mac):
                                     # Update progress time - active upgrade is progressing
                                     last_progress_time = time.time()
                                     no_progress_displayed = False
-                        
+
                         # Check for stalled upgrades - if no progress for 60 seconds, report failure
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
                             no_progress_displayed = True
                             print(f"\n[FAIL] No progress detected in last 60 seconds. The following APs failed to upgrade:\n")
-                            
+
                             stalled_aps = []
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
@@ -4201,14 +4244,14 @@ EXAMPLES:
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
                                     current_version = unifi_utils.get_ap_current_version(ap_mac)
                                     is_actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac)
-                                    
+
                                     # Report as failed if version hasn't changed and upgrade is NOT actively in progress
                                     # (Even if upgrade_to_firmware is queued, if it hasn't started after 60s, it failed)
                                     if current_version == ap_info['current_version'] and not is_actively_upgrading:
                                         print(f"  {ap_info['name']}: {current_version} (stuck at {state_desc}) - upgrade failed to start")
                                         stalled_aps.append(ap_mac)
                                         completed_aps[ap_mac] = time.time()  # Mark as "done" so we stop monitoring it
-                            
+                                        failed_aps.add(ap_mac)
                             if not stalled_aps:
                                 # False alarm - APs are actually progressing, just slowly
                                 no_progress_displayed = False
@@ -4218,25 +4261,26 @@ EXAMPLES:
                                 active_aps = [mac for mac in aps_upgrading if mac not in completed_aps]
                                 if active_aps:
                                     print(f"\nContinuing to monitor {len(active_aps)} AP(s) still upgrading...\n")
-                        
+
                         # Show progress countdown
                         if time_since_progress > no_progress_threshold and no_progress_displayed:
                             remaining_timeout = timeout_seconds - elapsed
                             remaining_minutes = int(remaining_timeout // 60)
                             remaining_seconds = int(remaining_timeout % 60)
                             print(f"[WAIT] {remaining_minutes}m:{remaining_seconds:02d}s until timeout...", flush=True)
-                        
+
                         # If all APs upgraded, exit
                         if len(completed_aps) == len(aps_upgrading):
                             break
-                        
+
                         # Sleep before next check
                         time.sleep(check_interval)
-                    
+
                     # Display all completion results at the end
                     print(f"\n{'='*80}")
+                    successful_count = 0
                     for ap_mac in list(aps_upgrading.keys()):
-                        if ap_mac in completed_aps:
+                        if ap_mac in completed_aps and ap_mac not in failed_aps:
                             ap_info = aps_upgrading[ap_mac]
                             completion_time = completed_aps[ap_mac]
                             initiation_time = ap_initiation_times.get(ap_mac, completion_time)
@@ -4245,35 +4289,40 @@ EXAMPLES:
                             duration_secs = int(duration_seconds % 60)
                             completion_time_str = datetime.fromtimestamp(completion_time).strftime("%H:%M:%S")
                             print(f"[OK] Successful upgrade: {ap_info['name']} -> {ap_info['target_version']} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)")
+                            successful_count += 1
+
+                    # Print summary
+                    if failed_aps:
+                        print(f"\n[PARTIAL] {successful_count} of {len(aps_upgrading)} AP(s) upgraded successfully, {len(failed_aps)} failed.")
+                    else:
+                        print(f"\n[SUCCESS] All {len(aps_upgrading)} AP(s) upgraded successfully!")
                     print(f"{'='*80}")
-                
                 # Display total execution time
                 upgrade_session_end = time.time()
                 total_duration = upgrade_session_end - upgrade_session_start
                 total_minutes = int(total_duration // 60)
                 total_seconds = int(total_duration % 60)
                 print(f"\nTotal execution time: {total_minutes}m:{total_seconds:02d}s")
-            
             # Exit after upgrade to prevent falling through to client action handlers
             sys.exit(0)
-        
+
         # =====================================================================
         # CHECK_AP action (diagnostic)
         # =====================================================================
         if args.action == 'check_ap':
             ap_mac = None
             ap_name = None
-            
+
             if args.ap_mac:
                 ap_mac = args.ap_mac
             elif args.ap_name:
                 ap_name = args.ap_name
-            
+
             # Get AP info
             print("Fetching UniFi devices...")
             all_devices = unifi_utils.get_devices()
             aps = [device for device in all_devices if device.get("type") == "uap"]
-            
+
             matching_ap = None
             if ap_mac:
                 # Find by MAC
@@ -4288,14 +4337,14 @@ EXAMPLES:
                     if (ap.get("name") or ap.get("model", "")).lower() == ap_name.lower():
                         matching_ap = ap
                         break
-            
+
             if not matching_ap:
                 print(f"Error: No AP found with {'MAC' if ap_mac else 'name'} {ap_mac or ap_name}")
                 sys.exit(1)
-            
+
             # Use the diagnostic function
             status = unifi_utils.check_ap_upgrade_status(matching_ap.get("mac"))
-            
+
             if status.get("found"):
                 print(f"\n=== {status.get('name')} Status ===")
                 print(f"MAC: {status.get('mac')}")
@@ -4308,12 +4357,12 @@ EXAMPLES:
                 print(f"Adopted: {status.get('adopted')}")
                 print(f"Uptime: {status.get('uptime_days')} days")
                 print(f"Last Seen: {status.get('last_seen')}")
-                
+
                 if status.get("issues"):
                     print(f"\n[WARNING] Issues found:")
                     for issue in status.get("issues"):
                         print(f"  - {issue}")
-                    
+
                     print(f"\n[NOTE] Recommendations:")
                     state = status.get('state')
                     if state == "CONNECTING/INITIALIZING":
@@ -4332,9 +4381,9 @@ EXAMPLES:
                     print("\n[OK] No obvious issues detected")
             else:
                 print(f"Error: {status.get('message')}")
-            
+
             sys.exit(0)
-        
+
         # =====================================================================
         # SAVE_MESH_TOPOLOGY action (export current mesh topology to JSON)
         # =====================================================================
@@ -4345,7 +4394,7 @@ EXAMPLES:
             else:
                 # Default: ~/.netcon-sync/topology.json
                 output_file = os.path.expanduser("~/.netcon-sync/topology.json")
-            
+
             # Create directory if it doesn't exist
             output_dir = os.path.dirname(output_file)
             if output_dir and not os.path.exists(output_dir):
@@ -4354,30 +4403,30 @@ EXAMPLES:
                 except (OSError, PermissionError) as e:
                     print(f"Error: Failed to create directory {output_dir}: {e}")
                     sys.exit(1)
-            
+
             # Fetch current APs from UniFi
             print("Fetching current AP mesh topology from UniFi controller...")
             all_devices = unifi_utils.get_devices()
             aps = [device for device in all_devices if device.get("type") == "uap"]
-            
+
             if not aps:
                 print("Error: No Access Points found.")
                 sys.exit(1)
-            
+
             # Serialize topology to JSON
             try:
                 json_str = ap_topology_to_json(aps)
-                
+
                 # Write to file
                 with open(output_file, 'w') as f:
                     f.write(json_str)
-                
+
                 print(f"[OK] Topology saved to: {output_file}")
                 print(f"  APs: {len(aps)}\n")
-                
+
                 # Display tree view
                 display_ap_tree(aps, show_macs=True)
-                
+
                 sys.exit(0)
             except (IOError, OSError, PermissionError) as e:
                 print(f"Error: Failed to write topology file {output_file}: {e}")
@@ -4385,7 +4434,7 @@ EXAMPLES:
             except Exception as e:
                 print(f"Error: Failed to serialize topology: {e}")
                 sys.exit(1)
-        
+
         # =====================================================================
         # WAIT_FOR_MESH_TOPOLOGY action
         # =====================================================================
@@ -4396,45 +4445,45 @@ EXAMPLES:
             else:
                 # Default: ~/.netcon-sync/topology.json
                 topology_file = os.path.expanduser("~/.netcon-sync/topology.json")
-            
+
             # Load desired topology from JSON file
             if not os.path.exists(topology_file):
                 print(f"Error: Topology file not found: {topology_file}")
                 print("\nFirst, save a topology using: ./unifi_climgr.py save_mesh_topology")
                 sys.exit(1)
-            
+
             try:
                 with open(topology_file, 'r') as f:
                     json_content = f.read()
-                
+
                 # Parse JSON into serialized format (list of dicts)
                 topology_list = json.loads(json_content)
-                
+
                 if not topology_list:
                     print(f"Error: Empty topology in {topology_file}")
                     sys.exit(1)
-                
+
                 # Deserialize into AP objects for tree display
                 desired_aps = deserialize_ap_topology(topology_list)
-                
+
                 print(f"Loaded desired topology from: {topology_file}")
                 print(f"Desired APs: {len(topology_list)}\n")
-                
+
                 # Display as tree
                 display_ap_tree(desired_aps, show_macs=True)
-                
+
                 # Wait for mesh topology to rebuild
                 _wait_for_mesh_topology(topology_list, timeout_minutes=args.timeout)
-                
+
             except (IOError, OSError, PermissionError) as e:
                 print(f"Error: Failed to read topology file {topology_file}: {e}")
                 sys.exit(1)
             except (json.JSONDecodeError, ValueError) as e:
                 print(f"Error: Failed to parse topology file as JSON {topology_file}: {e}")
                 sys.exit(1)
-            
+
             sys.exit(0)
-        
+
         # =====================================================================
         # ENABLE action
         # =====================================================================
@@ -4448,7 +4497,7 @@ EXAMPLES:
                 if not ssids:
                     print("No SSIDs found.")
                     sys.exit(0)
-                
+
                 # Find matching SSIDs
                 matching_ssids = []
                 if args.name:
@@ -4460,11 +4509,11 @@ EXAMPLES:
                 else:
                     # No specific SSID or filter: enable ALL SSIDs
                     matching_ssids = ssids
-                
+
                 if not matching_ssids:
                     print(f"No SSIDs found matching the specified criteria.")
                     sys.exit(0)
-                
+
                 print(f"\nEnabling {len(matching_ssids)} SSID(s)...")
                 for ssid in matching_ssids:
                     ssid_name = ssid.get("name", "Unknown")
@@ -4475,7 +4524,7 @@ EXAMPLES:
                     else:
                         print(f"?)... [FAIL]")
                 sys.exit(0)
-            
+
             elif args.aps:
                 # =====================================================================
                 # ENABLE AP action
@@ -4483,11 +4532,11 @@ EXAMPLES:
                 print("Fetching UniFi devices...")
                 all_devices = unifi_utils.get_devices()
                 aps = [device for device in all_devices if device.get("type") == "uap"]
-                
+
                 if not aps:
                     print("No Access Points found.")
                     sys.exit(0)
-                
+
                 # Find matching APs
                 matching_aps = []
                 if args.name:
@@ -4503,11 +4552,11 @@ EXAMPLES:
                 else:
                     # No specific AP or filter: enable ALL APs
                     matching_aps = aps
-                
+
                 if not matching_aps:
                     print(f"No Access Points found matching the specified criteria.")
                     sys.exit(0)
-                
+
                 print(f"\nEnabling {len(matching_aps)} AP(s)...")
                 for ap in matching_aps:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
@@ -4519,7 +4568,7 @@ EXAMPLES:
                     else:
                         print(f"?)... [FAIL]")
                 sys.exit(0)
-        
+
         # =====================================================================
         # DISABLE action
         # =====================================================================
@@ -4533,7 +4582,7 @@ EXAMPLES:
                 if not ssids:
                     print("No SSIDs found.")
                     sys.exit(0)
-                
+
                 # Find matching SSIDs
                 matching_ssids = []
                 if args.name:
@@ -4545,11 +4594,11 @@ EXAMPLES:
                 else:
                     # No specific SSID or filter: disable ALL SSIDs
                     matching_ssids = ssids
-                
+
                 if not matching_ssids:
                     print(f"No SSIDs found matching the specified criteria.")
                     sys.exit(0)
-                
+
                 print(f"\nDisabling {len(matching_ssids)} SSID(s)...")
                 for ssid in matching_ssids:
                     ssid_name = ssid.get("name", "Unknown")
@@ -4560,7 +4609,7 @@ EXAMPLES:
                     else:
                         print(f"?)... [FAIL]")
                 sys.exit(0)
-            
+
             elif args.aps:
                 # =====================================================================
                 # DISABLE AP action
@@ -4568,11 +4617,11 @@ EXAMPLES:
                 print("Fetching UniFi devices...")
                 all_devices = unifi_utils.get_devices()
                 aps = [device for device in all_devices if device.get("type") == "uap"]
-                
+
                 if not aps:
                     print("No Access Points found.")
                     sys.exit(0)
-                
+
                 # Find matching APs
                 matching_aps = []
                 if args.name:
@@ -4588,11 +4637,11 @@ EXAMPLES:
                 else:
                     # No specific AP or filter: disable ALL APs
                     matching_aps = aps
-                
+
                 if not matching_aps:
                     print(f"No Access Points found matching the specified criteria.")
                     sys.exit(0)
-                
+
                 print(f"\nDisabling {len(matching_aps)} AP(s)...")
                 for ap in matching_aps:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
@@ -4604,7 +4653,7 @@ EXAMPLES:
                     else:
                         print(f"?)... [FAIL]")
                 sys.exit(0)
-        
+
         # =====================================================================
         # ACTION commands (lock, unlock, reconnect, forget, block, unblock)
         # For all these actions, fetch and filter clients
@@ -4689,7 +4738,7 @@ EXAMPLES:
                         results[mac.lower()] = unifi_utils.lock_client_to_ap(mac, live_ap_mac)
                 print_action_results_table(filtered_clients, "lock", results)
                 sys.exit(0)
-            
+
             # Lock to specific AP
             print(f"Locking to {target_desc}...")
             results = {}
@@ -4698,7 +4747,7 @@ EXAMPLES:
                 if mac:
                     results[mac.lower()] = unifi_utils.lock_client_to_ap(mac, ap_mac)
             print_action_results_table(filtered_clients, "lock", results)
-        
+
         elif args.action == 'unlock_client':
             print("Unlocking clients...")
             results = {}
@@ -4707,11 +4756,11 @@ EXAMPLES:
                 if mac:
                     results[mac.lower()] = unifi_utils.unlock_client_from_ap(mac)
             print_action_results_table(filtered_clients, "unlock", results)
-        
+
         elif args.action == 'reconnect_client':
             # Check if delay is specified for sequential reconnects
             delay_ms = getattr(args, 'delay', None)
-            
+
             if delay_ms is not None:
                 # Sequential mode with delay
                 start_timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -4727,13 +4776,13 @@ EXAMPLES:
                             print(f"[{i}/{total}] Waiting {delay_ms}ms before next client...", end="", flush=True)
                             time.sleep(delay_sec)
                             print("\r" + " " * 60 + "\r", end="", flush=True)  # Clear the line
-                        
+
                         # Show which client is being reconnected
                         hostname = client.get("hostname", client.get("name", "Unknown"))
                         print(f"[{i+1}/{total}] Reconnecting {hostname} ({mac})...", end="", flush=True)
                         results[mac.lower()] = unifi_utils.reconnect_client(mac)
                         print(" OK")  # Mark complete
-                
+
                 print()  # Blank line before results table
                 print_action_results_table(filtered_clients, "reconnect", results)
             else:
@@ -4746,10 +4795,10 @@ EXAMPLES:
                     if mac:
                         results[mac.lower()] = unifi_utils.reconnect_client(mac)
                 print_action_results_table(filtered_clients, "reconnect", results)
-        
+
         elif args.action == 'forget':
             handle_forget_action_batch(filtered_clients)
-        
+
         elif args.action == 'block_client':
             print("Blocking clients...")
             results = {}
@@ -4758,7 +4807,7 @@ EXAMPLES:
                 if mac:
                     results[mac.lower()] = unifi_utils.block_client(mac)
             print_action_results_table(filtered_clients, "block", results)
-        
+
         elif args.action == 'unblock_client':
             print("Unblocking clients...")
             results = {}
@@ -4767,63 +4816,63 @@ EXAMPLES:
                 if mac:
                     results[mac.lower()] = unifi_utils.unblock_client(mac)
             print_action_results_table(filtered_clients, "unblock", results)
-        
+
         elif args.action == 'collect_ap_logs':
             print("unifi_climgr - AP Log Collection\n")
-            
+
             # Login to controller
             print("Logging into UniFi controller...")
             unifi_utils.login()
             print("[OK] Login successful\n")
-            
+
             # Get SSH credentials from controller
             print("Retrieving SSH credentials from controller...")
             ssh_username, ssh_password = get_ssh_credentials()
-            
+
             if not ssh_username or not ssh_password:
                 print("ERROR: Could not retrieve SSH credentials from controller.")
                 print("Please ensure SSH is configured in UniFi Settings > System > Advanced.")
                 sys.exit(1)
-            
+
             # Fetch APs from controller
             print("Fetching UniFi devices...")
             devices = unifi_utils.make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
-            
+
             if isinstance(devices, dict) and 'data' in devices:
                 devices = devices['data']
-            
+
             # Filter for Access Points only
             aps = [d for d in devices if d.get('type') == 'uap']
-            
+
             if not aps:
                 print("No Access Points found.")
                 sys.exit(0)
-            
+
             print(f"Found {len(aps)} Access Point(s)")
-            
+
             # Apply filters
             filtered_aps = aps
-            
+
             if args.filter_name:
                 filtered_aps = [ap for ap in filtered_aps if args.filter_name.lower() in ap.get('name', '').lower()]
-            
+
             if args.filter_ip:
                 filtered_aps = [ap for ap in filtered_aps if args.filter_ip in ap.get('ip', '')]
-            
+
             if args.filter_mac:
                 filter_mac_clean = args.filter_mac.replace(':', '').replace('-', '').lower()
                 filtered_aps = [ap for ap in filtered_aps 
                                if filter_mac_clean in ap.get('mac', '').replace(':', '').lower()]
-            
+
             if args.online_only:
                 filtered_aps = [ap for ap in filtered_aps if ap.get('state') == 1]
-            
+
             if not filtered_aps:
                 print("No Access Points match the specified filters.")
                 sys.exit(0)
-            
+
             print(f"Collecting logs from {len(filtered_aps)} AP(s)...\n")
-            
+
             # Collect logs
             ap_results, controller_result, collection_info = collect_all_ap_logs(
                 output_dir=args.output,
@@ -4834,14 +4883,14 @@ EXAMPLES:
                 timeout=args.timeout,
                 include_controller=not args.no_controller
             )
-            
+
             # Print summary
             successful = [r for r in ap_results if r['success']]
             failed = [r for r in ap_results if not r['success']]
-            
+
             total_files = sum(len(r.get('files', [])) for r in successful)
             total_size = sum(sum(f['size'] for f in r.get('files', [])) for r in successful)
-            
+
             print(f"\n{'='*60}")
             print(f"COLLECTION SUMMARY")
             print(f"{'='*60}")
@@ -4853,11 +4902,11 @@ EXAMPLES:
             print(f"  [FAIL] Failed: {len(failed)}")
             print(f"\nTotal files collected: {total_files}")
             print(f"Total size: {total_size:,} bytes ({total_size / 1024 / 1024:.2f} MB)")
-            
+
             if total_files > 0:
                 avg_size = total_size / total_files
                 print(f"Average file size: {avg_size:,.0f} bytes ({avg_size / 1024:.1f} KB)")
-            
+
             print(f"\nPer-AP breakdown:")
             for r in successful:
                 num_files = len(r.get('files', []))
@@ -4871,12 +4920,12 @@ EXAMPLES:
                 dir_name = f"{safe_ap_name}_{ap_mac.replace(':', '-')}"
                 print(f"  - {dir_name}: {num_files} file(s), {ap_size:,} bytes ({ap_size / 1024:.1f} KB), {elapsed:.1f}s")
                 print(f"    Start: {start_ts}  End: {end_ts}")
-            
+
             if failed:
                 print(f"\nFailed APs:")
                 for r in failed:
                     print(f"  - {r['ap_name']} ({r['ap_ip']}): {r.get('error', 'Unknown error')}")
-            
+
             if controller_result and controller_result['success']:
                 ctrl_size = controller_result['size']
                 ctrl_elapsed = controller_result.get('elapsed_time', 0)
@@ -4887,7 +4936,7 @@ EXAMPLES:
                 print(f"  Start: {ctrl_start}  End: {ctrl_end}")
             elif controller_result:
                 print(f"\nWARNING: Controller support file collection failed: {controller_result.get('error', 'Unknown error')}")
-            
+
             # Save summary to JSON
             collection_dir = collection_info['collection_dir']
             summary_file = collection_dir / "collection_summary.json"
@@ -4901,36 +4950,36 @@ EXAMPLES:
                 'controller_support_file': controller_result,
                 'results': ap_results
             }
-            
+
             with open(summary_file, 'w') as f:
                 json.dump(summary_data, f, indent=2)
-            
+
             print(f"\n[OK] Summary saved to: {summary_file}")
-            
+
             # Create tarball
             print(f"\nCreating tarball...")
             tarball_start_time = time.time()
             tarball_name = f"ap_log_{collection_info['timestamp']}.tgz"
             tarball_path = args.output / tarball_name
-            
+
             try:
                 with tarfile.open(tarball_path, 'w:gz') as tar:
                     tar.add(collection_dir, arcname=collection_dir.name)
-                
+
                 tarball_size = tarball_path.stat().st_size
                 size_display = f"{tarball_size/1024/1024:.1f} MB" if tarball_size > 1024*1024 else f"{tarball_size/1024:.1f} KB"
-                
+
                 print(f"[OK] Created {tarball_path} ({size_display})")
-                
+
                 # Clean up collection directory
                 shutil.rmtree(collection_dir)
                 print(f"[OK] Cleaned up collection directory")
-                
+
                 tarball_elapsed = time.time() - tarball_start_time
                 print(f"\nTarball creation took {tarball_elapsed:.1f}s")
             except Exception as e:
                 print(f"WARNING: Failed to create tarball: {e}")
-            
+
             sys.exit(0 if len(failed) == 0 else 1)
 
     except nss.error.NSPRError as e:

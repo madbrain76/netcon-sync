@@ -36,7 +36,7 @@ def _detect_local_domain() -> str:
     2. dnsdomainname command
     3. hostname -d command
     4. Falls back to empty string
-    
+
     Returns:
         str: Local domain (e.g., "example.com") or empty string if not found
     """
@@ -57,7 +57,7 @@ def _detect_local_domain() -> str:
                         return domain
     except (FileNotFoundError, PermissionError, IOError):
         pass
-    
+
     # Method 2: Try dnsdomainname command
     try:
         result = subprocess.run(['dnsdomainname'], capture_output=True, text=True, timeout=1)
@@ -65,7 +65,7 @@ def _detect_local_domain() -> str:
             return result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         pass
-    
+
     # Method 3: Try hostname -d command
     try:
         result = subprocess.run(['hostname', '-d'], capture_output=True, text=True, timeout=1)
@@ -73,7 +73,7 @@ def _detect_local_domain() -> str:
             return result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         pass
-    
+
     # Method 4: Try systemd-resolved (if available)
     try:
         result = subprocess.run(['resolvectl', 'query', '--legend=no', 'localhost'], 
@@ -87,7 +87,7 @@ def _detect_local_domain() -> str:
                         return domains[0]
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         pass
-    
+
     # No domain found
     return ""
 
@@ -96,18 +96,18 @@ def _validate_unifi_config() -> dict:
     """
     Load and validate UniFi-specific environment variables.
     Required for all scripts.
-    
+
     DEFAULT_DOMAIN is auto-detected from OS configuration.
-    
+
     Returns:
         dict: Configuration dictionary with UniFi values
-    
+
     Raises:
         ValueError: If required UniFi variables are missing
     """
     # Auto-detect from OS configuration
     default_domain = _detect_local_domain()
-    
+
     config = {
         "UNIFI_NETWORK_URL": os.getenv("UNIFI_NETWORK_URL"),
         "UNIFI_USERNAME": os.getenv("UNIFI_USERNAME"),
@@ -115,13 +115,13 @@ def _validate_unifi_config() -> dict:
         "UNIFI_SITE_ID": os.getenv("UNIFI_SITE_ID", "default"),
         "DEFAULT_DOMAIN": default_domain,
     }
-    
+
     missing_vars = [var for var in ["UNIFI_NETWORK_URL", "UNIFI_USERNAME", "UNIFI_PASSWORD"] 
                     if not config[var]]
-    
+
     if missing_vars:
         raise ValueError(f"Missing required UniFi environment variables: {', '.join(missing_vars)}")
-    
+
     return config
 
 
@@ -129,10 +129,10 @@ def _validate_pfsense_config() -> dict:
     """
     Load and validate pfSense-specific environment variables.
     Only required for pfSense sync scripts.
-    
+
     Returns:
         dict: Configuration dictionary with pfSense values (None values allowed)
-    
+
     Raises:
         ValueError: If required pfSense variables are missing
     """
@@ -141,12 +141,12 @@ def _validate_pfsense_config() -> dict:
         "PFSENSE_APIV2_KEY": os.getenv("PFSENSE_APIV2_KEY"),
         "PFSENSE_DHCP_INTERFACE": os.getenv("PFSENSE_DHCP_INTERFACE", "lan"),
     }
-    
+
     missing_vars = [var for var in ["PFSENSE_URL", "PFSENSE_APIV2_KEY"] if not config[var]]
-    
+
     if missing_vars:
         raise ValueError(f"Missing required pfSense environment variables: {', '.join(missing_vars)}")
-    
+
     return config
 
 
@@ -172,10 +172,10 @@ def load_pfsense_config():
     """
     Explicitly load and validate pfSense configuration.
     Call this from scripts that need pfSense access (e.g., pfsense2unifi.py).
-    
+
     Returns:
         tuple: (PFSENSE_URL, PFSENSE_APIV2_KEY, PFSENSE_DHCP_INTERFACE)
-    
+
     Raises:
         ValueError: If required pfSense variables are missing
     """

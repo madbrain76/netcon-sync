@@ -18,6 +18,11 @@ import nss.error
 from config import UNIFI_NETWORK_URL, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_SITE_ID
 from http_tls_nss import NSPRNSSURLOpener
 
+try:
+    import paramiko
+except ImportError:
+    paramiko = None
+
 # Module-level URL opener for session state across requests
 _opener = None
 
@@ -40,10 +45,10 @@ def cleanup():
 def validate_mac_address(mac: str) -> bool:
     """
     Validate MAC address format (must use colons, e.g., 'AA:BB:CC:DD:EE:FF').
-    
+
     Args:
         mac (str): The MAC address to validate
-    
+
     Returns:
         bool: True if valid, False otherwise
     """
@@ -69,9 +74,9 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, st
     """
     Handles common UniFi API request logic, including URL construction,
     error handling, and JSON parsing. Automatically retries on failure with exponential backoff.
-    
+
     Does NOT retry NSS/NSPR certificate errors - these are raised immediately.
-    
+
     Session state is delegated to NSPRNSSURLOpener (transparent to caller).
     Certificate validation uses NSS database.
 
@@ -93,48 +98,48 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, st
     max_attempts = 3
     attempt = 0
     last_error = None
-    
+
     while attempt < max_attempts:
         attempt += 1
         try:
             opener = _get_opener()
             url = f"{UNIFI_NETWORK_URL}{endpoint}"
-            
+
             # Prepare headers
             headers = kwargs.get('headers', {}).copy() if 'headers' in kwargs else {}
-            
+
             # Prepare body
             body = kwargs.get('body')
             json_data = kwargs.get('json')
-            
+
             if json_data:
                 headers['Content-Type'] = 'application/json'
                 body = json.dumps(json_data).encode('utf-8')
-            
+
             # opener.request handles session state internally
             response = opener.request(method, url, data=body, headers=headers)
-            
+
             # Check HTTP status before reading body
             if 400 <= response.getcode() < 600:
                 error_msg = response.read().decode('utf-8', errors='replace')
                 raise Exception(f"HTTP {response.getcode()}: {error_msg}")
-            
+
             # If streaming, return response object for caller to read
             if stream:
                 return response
-            
+
             # Read response data
             response_bytes = response.read()
-            
+
             # Return raw bytes if requested (for binary downloads)
             if return_raw:
                 return response_bytes
-            
+
             # Parse and return JSON response
             response_text = response_bytes.decode('utf-8')
             response_data = json.loads(response_text) if response_text else {}
             return response_data.get("data", {}) if "stat" in endpoint or "rest" in endpoint or "cmd" in endpoint else response_data
-            
+
         except nss.error.NSPRError as e:
             # NSS/NSPR errors are not retryable - raise immediately
             raise
@@ -143,13 +148,13 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, st
             # Check if this error is retryable
             if not _is_retryable_error(e):
                 raise
-            
+
             # If this is the last attempt, raise the error
             if attempt >= max_attempts:
                 raise Exception(f"Network or API error during {method} {endpoint}: {e}")
-            
+
             # No delay - fail fast on transient errors
-    
+
     # Shouldn't reach here, but just in case
     if last_error:
         raise Exception(f"Network or API error during {method} {endpoint}: {last_error}")
@@ -165,19 +170,19 @@ def login() -> None:
 
     login_url = "/api/login"
     login_data = {"username": UNIFI_USERNAME, "password": UNIFI_PASSWORD}
-    
+
     make_unifi_api_call("POST", login_url, json=login_data)
 
 
 def get_devices() -> list:
     """
     Retrieves all devices (APs, switches, gateways, etc.) for the configured site.
-    
+
     Returns:
         list: List of device dictionaries, including type, MAC, name, IP, and other properties.
     """
     endpoint = f"/api/s/{UNIFI_SITE_ID}/stat/device"
-    
+
     try:
         devices_data = make_unifi_api_call("GET", endpoint)
         return devices_data if isinstance(devices_data, list) else []
@@ -209,10 +214,10 @@ def _derive_wifi_generation_from_proto(proto) -> str:
     """
     Derive WiFi generation (1-7) from protocol string.
     Proto values from UniFi: 'a', 'b', 'g', 'n', 'ac', 'ax', 'be', 'ng', 'na', etc.
-    
+
     The proto value reflects what the CLIENT is actually using, not AP capabilities.
     The actual band (2.4/5/6 GHz) is determined by the channel, not the proto.
-    
+
     Proto mappings:
     'a'  = 802.11a (WiFi 2, 5 GHz only)
     'b'  = 802.11b (WiFi 1, 2.4 GHz only)
@@ -226,9 +231,9 @@ def _derive_wifi_generation_from_proto(proto) -> str:
     """
     if not proto or proto == "N/A":
         return "N/A"
-    
+
     proto_lower = str(proto).lower()
-    
+
     # Map protocol to WiFi generation (numerical only)
     proto_map = {
         "a": "2",
@@ -241,7 +246,7 @@ def _derive_wifi_generation_from_proto(proto) -> str:
         "ax": "6",
         "be": "7",
     }
-    
+
     return proto_map.get(proto_lower, "N/A")
 
 
@@ -249,15 +254,15 @@ def _derive_ieee_version_from_proto(proto) -> str:
     """
     Derive IEEE 802.11 version from protocol string.
     Proto values from UniFi: 'a', 'b', 'g', 'n', 'ac', 'ax', 'be', 'ng', 'na', etc.
-    
+
     The actual band (2.4/5/6 GHz) is determined by the channel, not the proto.
     802.11n, 802.11ax, and 802.11be can operate on multiple bands.
     """
     if not proto or proto == "N/A":
         return "N/A"
-    
+
     proto_lower = str(proto).lower()
-    
+
     # Map protocol to IEEE version
     ieee_map = {
         "a": "802.11a",
@@ -270,7 +275,7 @@ def _derive_ieee_version_from_proto(proto) -> str:
         "ax": "802.11ax",
         "be": "802.11be",
     }
-    
+
     return ieee_map.get(proto_lower, "N/A")
 
 
@@ -297,10 +302,10 @@ def get_all_unifi_clients() -> list:
 
     # Fetch live connected clients (contains active fixed AP status, current IP, signal, etc.)
     live_clients_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/sta")
-    
+
     # Fetch UniFi devices (APs) to map MACs to names
     devices_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/device")
-    
+
     # Create a map from AP MAC (lowercase) to AP Name for easy lookup
     ap_mac_to_name_map = {}
     for device in devices_data:
@@ -319,12 +324,12 @@ def get_all_unifi_clients() -> list:
         mac = client.get("mac")
         if not mac:
             continue
-        
+
         normalized_mac = mac.lower()
 
         # Start with a copy of the raw client data from /rest/user for display purposes
         merged_client = client.copy()
-        
+
         # Initialize fields to default/N/A for consistent display
         merged_client["is_connected_live"] = False
         merged_client["live_ip"] = "N/A"
@@ -354,15 +359,15 @@ def get_all_unifi_clients() -> list:
             merged_client["tx_retries_display"] = str(live_data.get("tx_retries")) if live_data.get("tx_retries") is not None else "N/A"
             merged_client["live_channel"] = live_data.get("channel", "N/A")
             merged_client["live_ssid"] = live_data.get("essid", live_data.get("ssid", "N/A"))
-            
+
             # Derive band, WiFi generation, and IEEE version from channel and proto
             channel = live_data.get("channel", "N/A")
             proto = live_data.get("radio_proto", "N/A")  # e.g., "a", "b", "g", "n", "ac", "ax", "be", "ng", "na"
-            
+
             merged_client["live_band"] = _derive_band_from_channel(channel)
             merged_client["live_wifi_generation"] = _derive_wifi_generation_from_proto(proto)
             merged_client["live_ieee_version"] = _derive_ieee_version_from_proto(proto)
-            
+
             live_ap_mac = live_data.get("ap_mac")
             if live_ap_mac:
                 merged_client["live_ap_mac"] = live_ap_mac
@@ -374,7 +379,7 @@ def get_all_unifi_clients() -> list:
 
             if live_data.get("last_seen"):
                 merged_client["last_seen"] = live_data["last_seen"]
-            
+
             # Use live data for AP locking status if client is online
             # Note: 'fixed_ap_enabled' comes from /stat/sta, 'ap_fixed' from /rest/user
             if live_data.get("fixed_ap_enabled"):
@@ -422,7 +427,7 @@ def get_all_unifi_clients() -> list:
         last_seen_str = "N/A"
         # Prioritize live_data's last_seen if available, otherwise use known_client's
         last_seen_timestamp_ms = live_data.get("last_seen") if live_data else client.get("last_seen")
-        
+
         if isinstance(last_seen_timestamp_ms, (int, float)):
             try:
                 if last_seen_timestamp_ms > 100000000000: # Check if timestamp is in milliseconds
@@ -436,7 +441,7 @@ def get_all_unifi_clients() -> list:
             except (TypeError, ValueError):
                 last_seen_str = "Timestamp Error"
         merged_client["last_seen_formatted"] = last_seen_str
-        
+
         # Add description logic
         description = client.get("name")
         if not description or description == client.get("hostname"):
@@ -537,7 +542,7 @@ def build_client_payload(original_client_data: dict) -> dict:
         # Ensure empty strings for string fields that might otherwise be just whitespace
         elif isinstance(value, str) and value.strip() == "":
             payload[key] = ""
-        
+
     # Re-evaluate display_name if it became empty after cleanup (e.g., if original was None or empty)
     if not payload.get("display_name"):
         if original_client_data.get("name"):
@@ -568,7 +573,7 @@ def lock_client_to_ap(client_mac: str, ap_mac: str) -> bool:
         return False
 
     endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
-    
+
     payload = build_client_payload(original_client_data)
 
     # Specific changes for locking:
@@ -595,9 +600,9 @@ def unlock_client_from_ap(client_mac: str) -> bool:
         return False
 
     endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
-    
+
     payload = build_client_payload(original_client_data)
-    
+
     # Specific changes for unlocking:
     # CRITICAL: fixed_ap_mac MUST BE ABSENT, not null, for unlock to work.
     if "fixed_ap_mac" in payload:
@@ -615,7 +620,7 @@ def forget_client(mac: str) -> bool:
     """
     Instructs the UniFi controller to "forget" a client by its MAC address.
     Forgetting a client removes it from the known client list and history.
-    
+
     Args:
         mac (str): The MAC address of the client to forget (e.g., "11:22:33:44:55:66").
 
@@ -640,14 +645,14 @@ def forget_clients_batch(macs: list) -> dict:
     """
     Instructs the UniFi controller to "forget" multiple clients in a single API call.
     This is much faster than calling forget_client() repeatedly.
-    
+
     UniFi's forget-sta command sometimes silently fails for certain client types or states,
     especially those without descriptions. If batch delete fails or devices still exist,
     falls back to individual forget calls.
-    
+
     Args:
         macs (list): List of MAC addresses to forget (e.g., ["11:22:33:44:55:66", "aa:bb:cc:dd:ee:ff"]).
-    
+
     Returns:
         dict: Results with keys:
             - "total": Total MAC addresses provided
@@ -655,36 +660,36 @@ def forget_clients_batch(macs: list) -> dict:
             - "success": True if all clients were successfully forgotten
     """
     results = {"total": len(macs), "sent": 0, "success": False}
-    
+
     if not macs:
         return results
-    
+
     # Filter out empty strings and convert to lowercase
     mac_list = [mac.lower() for mac in macs if mac]
     results["sent"] = len(mac_list)
-    
+
     if not mac_list:
         return results
-    
+
     endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/stamgr"
     payload = {"cmd": "forget-sta", "macs": mac_list}
-    
+
     try:
         # Try batch forget first (faster)
         make_unifi_api_call("POST", endpoint, json=payload)
-        
+
         # Verify that the clients were actually forgotten
         # Some UniFi versions silently fail for certain device types
         remaining_clients = get_unifi_clients_fast()
         remaining_macs = {mac.lower() for mac in remaining_clients.keys()}
-        
+
         still_present = [mac for mac in mac_list if mac in remaining_macs]
-        
+
         if still_present:
             # Batch delete didn't work for some devices, fall back to individual deletes
             import sys
             print(f"[WARN] Batch forget incomplete ({len(still_present)} devices still exist), falling back to individual forgets...", file=sys.stderr)
-            
+
             success_count = 0
             for mac in still_present:
                 try:
@@ -692,7 +697,7 @@ def forget_clients_batch(macs: list) -> dict:
                         success_count += 1
                 except Exception:
                     pass
-            
+
             # If all were deleted now, mark as success
             if success_count == len(still_present):
                 results["success"] = True
@@ -702,14 +707,14 @@ def forget_clients_batch(macs: list) -> dict:
         else:
             # Batch delete succeeded, all clients are gone
             results["success"] = True
-            
+
         return results
-        
+
     except (Exception, json.JSONDecodeError) as e:
         # If batch call itself fails, fall back to individual forgets
         import sys
         print(f"[WARN] Batch forget failed ({e}), falling back to individual forgets...", file=sys.stderr)
-        
+
         success_count = 0
         for mac in mac_list:
             try:
@@ -717,7 +722,7 @@ def forget_clients_batch(macs: list) -> dict:
                     success_count += 1
             except Exception:
                 pass
-        
+
         # If at least most succeeded, mark as success
         if success_count == len(mac_list):
             results["success"] = True
@@ -822,18 +827,18 @@ def add_client(mac: str, name: str | None = None, note: str | None = None) -> bo
               at the end of a sync for better performance.
     """
     import sys
-    
+
     if not mac:
         print("Error: MAC address is required to add/update a client.", file=sys.stderr)
         return False
-    
+
     # Validate MAC address format
     if not validate_mac_address(mac):
         print(f"Error: Invalid MAC address format: '{mac}'. Must use colon delimiters (e.g., 'AA:BB:CC:DD:EE:FF').", file=sys.stderr)
         return False
 
     normalized_mac = mac.lower()
-    
+
     # First, try to get existing client data to see if it's an update or new creation
     existing_client = _get_single_client_data_by_mac(normalized_mac)
 
@@ -845,21 +850,21 @@ def add_client(mac: str, name: str | None = None, note: str | None = None) -> bo
         if not client_id:
             print(f"Error: Existing client with MAC {mac} found, but no _id. Cannot update.", file=sys.stderr)
             return False
-        
+
         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
         method = "PUT"
-        
+
         # Start with the existing data and apply updates
         payload = build_client_payload(existing_client) # Use the existing build_client_payload
                                                          # to ensure consistent payload structure
-        
+
         # Apply new name and note, respecting None
         if name is not None:
             payload["name"] = name
             payload["display_name"] = name # UniFi often uses 'display_name' for the primary label
         if note is not None:
             payload["note"] = note
-            
+
     else:
         # This is a new client creation (POST request)
         method = "POST"
@@ -883,7 +888,6 @@ def add_client(mac: str, name: str | None = None, note: str | None = None) -> bo
         for key in ["name", "display_name", "note", "fixed_ip", "local_dns_record", "virtual_network_override_id", "usergroup_id"]:
             if payload.get(key) == "":
                 payload.pop(key)
-        
     try:
         make_unifi_api_call(method, endpoint, json=payload)
         return True
@@ -891,34 +895,95 @@ def add_client(mac: str, name: str | None = None, note: str | None = None) -> bo
         print(f"Failed to add/update client {mac}: {e}", file=sys.stderr)
         return False
 
-def restart_ap(ap_mac: str) -> bool:
+def restart_ap(ap_mac: str) -> dict:
     """
-    Restarts a specific access point (by MAC address).
-    
+    Restarts a specific access point (by MAC address) via controller API.
     Args:
         ap_mac (str): The MAC address of the AP to restart (e.g., "aa:bb:cc:dd:ee:ff").
-    
     Returns:
-        bool: True if the restart command was successfully sent, False otherwise.
+        dict: {
+            'success': bool,
+            'method': 'controller' | 'ssh' | None,
+            'error': str (if failed)
+        }
     """
     if not ap_mac:
-        return False
-    
+        return {'success': False, 'method': None, 'error': 'No MAC address provided'}
     endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/devmgr"
     # The 'restart' command expects a single 'mac' parameter
     payload = {"cmd": "restart", "mac": ap_mac.lower()}
-    
     try:
         response = make_unifi_api_call("POST", endpoint, json=payload)
-        return True
-    except (Exception, json.JSONDecodeError):
-        return False
+        return {'success': True, 'method': 'controller'}
+    except Exception as e:
+        return {'success': False, 'method': None, 'error': str(e)}
 
+def restart_ap_via_ssh(ap_ip: str, ssh_username: str, ssh_password: str, timeout: int = 30) -> dict:
+    """
+    Restart an AP via SSH using the 'reboot' command.
+    Args:
+        ap_ip: IP address of the AP
+        ssh_username: SSH username
+        ssh_password: SSH password
+        timeout: SSH connection timeout in seconds (default: 30)
+    Returns:
+        dict: {
+            'success': bool,
+            'method': 'ssh' | None,
+            'error': str (if failed)
+        }
+    """
+    if paramiko is None:
+        return {'success': False, 'method': None, 'error': 'paramiko module not available'}
+    if not ap_ip:
+        return {'success': False, 'method': None, 'error': 'No IP address provided'}
+    if not ssh_username or not ssh_password:
+        return {'success': False, 'method': None, 'error': 'SSH credentials not provided'}
+    ssh_client = None
+    try:
+        ssh_client = paramiko.SSHClient()
+        ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh_client.connect(
+            hostname=ap_ip,
+            username=ssh_username,
+            password=ssh_password,
+            timeout=timeout,
+            allow_agent=False,
+            look_for_keys=False,
+            banner_timeout=30
+        )
+        # Execute reboot command
+        # Note: Connection will likely close before we get output, which is expected
+        stdin, stdout, stderr = ssh_client.exec_command('reboot', timeout=5)
+        # Don't wait for output - the AP will disconnect immediately
+        return {'success': True, 'method': 'ssh'}
+    except paramiko.ssh_exception.AuthenticationException as e:
+        return {'success': False, 'method': None, 'error': f'SSH authentication failed: {e}'}
+    except paramiko.ssh_exception.NoValidConnectionsError as e:
+        return {'success': False, 'method': None, 'error': f'SSH connection failed: {e}'}
+    except paramiko.ssh_exception.SSHException as e:
+        # SSHException is expected after reboot command as connection closes
+        # If we got here after exec_command, the command was sent successfully
+        if "exec_command" in str(e) or "Timeout" in str(e):
+            return {'success': True, 'method': 'ssh'}
+        return {'success': False, 'method': None, 'error': f'SSH error: {e}'}
+    except Exception as e:
+        # Socket errors are expected after reboot command
+        error_str = str(e).lower()
+        if any(x in error_str for x in ['socket', 'connection', 'closed', 'timeout']):
+            return {'success': True, 'method': 'ssh'}
+        return {'success': False, 'method': None, 'error': f'Unexpected error: {e}'}
+    finally:
+        if ssh_client:
+            try:
+                ssh_client.close()
+            except:
+                pass
 
 def get_ssids() -> list:
     """
     Fetches all wireless networks (SSIDs) configured in UniFi.
-    
+
     Returns:
         list: A list of SSID objects, each containing:
             - _id: UniFi ID
@@ -937,46 +1002,46 @@ def get_ssids() -> list:
 def disable_ssid(ssid_name: str) -> bool:
     """
     Disables a wireless network (SSID) by name.
-    
+
     Args:
         ssid_name (str): The name of the SSID to disable.
-    
+
     Returns:
         bool: True if the SSID was successfully disabled, False otherwise.
     """
     if not ssid_name:
         return False
-    
+
     try:
         # Get all SSIDs
         ssids = get_ssids()
-        
+
         # Find matching SSID (case-insensitive)
         matching_ssid = None
         for ssid in ssids:
             if ssid.get("name", "").lower() == ssid_name.lower():
                 matching_ssid = ssid
                 break
-        
+
         if not matching_ssid:
             return False
-        
+
         # Check if already disabled
         if not matching_ssid.get("enabled", True):
             return True  # Already disabled
-        
+
         # Update SSID with enabled=false
         ssid_id = matching_ssid.get("_id")
         if not ssid_id:
             return False
-        
+
         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/wlanconf/{ssid_id}"
         payload = matching_ssid.copy()
         payload["enabled"] = False
-        
+
         make_unifi_api_call("PUT", endpoint, json=payload)
         return True
-        
+
     except (Exception, json.JSONDecodeError):
         return False
 
@@ -984,46 +1049,46 @@ def disable_ssid(ssid_name: str) -> bool:
 def enable_ssid(ssid_name: str) -> bool:
     """
     Enables a wireless network (SSID) by name.
-    
+
     Args:
         ssid_name (str): The name of the SSID to enable.
-    
+
     Returns:
         bool: True if the SSID was successfully enabled, False otherwise.
     """
     if not ssid_name:
         return False
-    
+
     try:
         # Get all SSIDs
         ssids = get_ssids()
-        
+
         # Find matching SSID (case-insensitive)
         matching_ssid = None
         for ssid in ssids:
             if ssid.get("name", "").lower() == ssid_name.lower():
                 matching_ssid = ssid
                 break
-        
+
         if not matching_ssid:
             return False
-        
+
         # Check if already enabled
         if matching_ssid.get("enabled", False):
             return True  # Already enabled
-        
+
         # Update SSID with enabled=true
         ssid_id = matching_ssid.get("_id")
         if not ssid_id:
             return False
-        
+
         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/wlanconf/{ssid_id}"
         payload = matching_ssid.copy()
         payload["enabled"] = True
-        
+
         make_unifi_api_call("PUT", endpoint, json=payload)
         return True
-        
+
     except (Exception, json.JSONDecodeError):
         return False
 
@@ -1032,20 +1097,20 @@ def disable_ap(ap_mac: str) -> bool:
     """
     Disables an access point by MAC address.
     Sets the device's disabled flag to prevent it from being managed.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP to disable (e.g., "aa:bb:cc:dd:ee:ff").
-    
+
     Returns:
         bool: True if the AP was successfully disabled, False otherwise.
     """
     if not ap_mac:
         return False
-    
+
     try:
         # Get all devices
         devices = get_devices()
-        
+
         # Find matching AP (case-insensitive MAC)
         matching_ap = None
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
@@ -1055,26 +1120,26 @@ def disable_ap(ap_mac: str) -> bool:
                 if device_mac == target_mac_lower:
                     matching_ap = device
                     break
-        
+
         if not matching_ap:
             return False
-        
+
         # Check if already disabled
         if matching_ap.get("disabled", False):
             return True  # Already disabled
-        
+
         # Update device with disabled=true
         device_id = matching_ap.get("_id")
         if not device_id:
             return False
-        
+
         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/device/{device_id}"
         payload = matching_ap.copy()
         payload["disabled"] = True
-        
+
         make_unifi_api_call("PUT", endpoint, json=payload)
         return True
-        
+
     except (Exception, json.JSONDecodeError):
         return False
 
@@ -1083,20 +1148,20 @@ def enable_ap(ap_mac: str) -> bool:
     """
     Enables an access point by MAC address.
     Clears the device's disabled flag to allow it to be managed.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP to enable (e.g., "aa:bb:cc:dd:ee:ff").
-    
+
     Returns:
         bool: True if the AP was successfully enabled, False otherwise.
     """
     if not ap_mac:
         return False
-    
+
     try:
         # Get all devices
         devices = get_devices()
-        
+
         # Find matching AP (case-insensitive MAC)
         matching_ap = None
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
@@ -1106,26 +1171,26 @@ def enable_ap(ap_mac: str) -> bool:
                 if device_mac == target_mac_lower:
                     matching_ap = device
                     break
-        
+
         if not matching_ap:
             return False
-        
+
         # Check if already enabled
         if not matching_ap.get("disabled", False):
             return True  # Already enabled
-        
+
         # Update device with disabled=false
         device_id = matching_ap.get("_id")
         if not device_id:
             return False
-        
+
         endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/device/{device_id}"
         payload = matching_ap.copy()
         payload["disabled"] = False
-        
+
         make_unifi_api_call("PUT", endpoint, json=payload)
         return True
-        
+
     except (Exception, json.JSONDecodeError):
         return False
 
@@ -1138,7 +1203,7 @@ def _get_ap_state_description(state):
     if isinstance(state, str):
         # If already a string from get_ap_state(), return as-is
         return state
-    
+
     # Backward compatibility for integer state codes
     state_map = {
         0: "DISCONNECTED",
@@ -1153,13 +1218,13 @@ def get_ap_state(ap_mac: str) -> str:
     """
     Get the current state of an AP by MAC address.
     Uses intelligent inference from multiple fields (adoption, upgrade status, uptime).
-    
+
     The controller sets upgrade_triggered_by to the username when a user initiates an upgrade.
     This reliably distinguishes UPGRADING from UPGRADABLE states.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP
-        
+
     Returns:
         str: AP state description:
              - "UPGRADING": upgrade_triggered_by is set (user initiated upgrade)
@@ -1171,7 +1236,7 @@ def get_ap_state(ap_mac: str) -> str:
     try:
         devices = get_devices()
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
-        
+
         for device in devices:
             if device.get("type") == "uap":
                 device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
@@ -1180,14 +1245,14 @@ def get_ap_state(ap_mac: str) -> str:
                     is_adopted = device.get("adopted", False)
                     if not is_adopted:
                         return "DISCONNECTED"
-                    
+
                     # Check version-based state (ignore upgrade_triggered_by, it's unreliable)
                     current_version = device.get("version")
                     target_version = device.get("upgrade_to_firmware")
                     upgrade_progress = device.get("upgrade_progress")
                     upgrade_state = device.get("upgrade_state")
                     upgradable = device.get("upgradable", False)
-                    
+
                     # 1. If versions differ, check if actively upgrading or just available
                     if current_version and target_version and current_version != target_version:
                         # Check for active upgrade activity
@@ -1196,29 +1261,29 @@ def get_ap_state(ap_mac: str) -> str:
                         # Otherwise just available
                         if upgradable:
                             return "UPGRADABLE"
-                    
+
                     # 2. Versions match, check if upgradable (shouldn't happen, but just in case)
                     if upgradable:
                         return "UPGRADABLE"
-                    
+
                     # 3. Check uptime - if uptime > 0, AP is running normally
                     uptime_seconds = device.get("uptime", 0)
                     if uptime_seconds and uptime_seconds > 0:
                         return "RUNNING"
-                    
+
                     # 4. Check if recently seen (within last 30 seconds)
                     import time
                     current_time = time.time()
                     last_seen = device.get("last_seen", 0)
                     if last_seen and (current_time - last_seen) < 30:
                         return "RUNNING"
-                    
+
                     # 5. If adopted but no uptime/recent activity, might be initializing
                     if is_adopted:
                         return "CONNECTING/INITIALIZING"
-                    
+
                     return "DISCONNECTED"
-        
+
         return "UNKNOWN"
     except Exception:
         return "UNKNOWN"
@@ -1227,16 +1292,16 @@ def get_ap_state(ap_mac: str) -> str:
 def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int = 300) -> dict:
     """
     Pre-upgrade health check: Verify all APs are in a state ready for upgrade.
-    
+
     Checks that all APs are either idle (RUNNING, no active upgrade) or already upgrading.
     APs already upgrading are returned separately so they are NOT re-initiated.
     If any AP is in "CONNECTING/INITIALIZING" state (getting ready), waits for it to
     transition to RUNNING state before proceeding.
-    
+
     Args:
         aps_to_upgrade (list): List of AP dicts with at least 'mac' and 'name' fields
         max_wait_seconds (int): Maximum time to wait for APs to reach RUNNING state (default 300s = 5 min)
-    
+
     Returns:
         dict: {
             "success": bool,
@@ -1247,7 +1312,7 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
         }
     """
     import time
-    
+
     if not aps_to_upgrade:
         return {
             "success": True,
@@ -1255,58 +1320,58 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
             "unhealthy_aps": [],
             "message": "No APs to check"
         }
-    
+
     print("\n[PRE-UPGRADE HEALTH CHECK]")
     print(f"Verifying {len(aps_to_upgrade)} AP(s) are ready for upgrade...\n")
-    
+
     # Get full device list to check upgrade states
     all_devices = get_devices()
     device_map = {}  # MAC -> full device dict
     for device in all_devices:
         if device.get("type") == "uap":
             device_map[device.get("mac", "").lower()] = device
-    
+
     # Track status by MAC address to preserve original order in final result
     ap_status = {}  # MAC -> {'ap': ap_dict, 'category': 'ready'|'already_upgrading'|'unhealthy'|'waiting'}
     aps_needing_wait = []
-    
+
     # First pass: identify which APs need waiting
     for ap in aps_to_upgrade:
         ap_mac = ap.get("mac")
         ap_name = ap.get("name") or ap.get("model", "Unknown AP")
-        
+
         if not ap_mac:
             continue
-        
+
         # Get full device data to check upgrade state
         device = device_map.get(ap_mac.lower())
         if not device:
             print(f"  [WARN] {ap_name}: Device not found")
             ap_status[ap_mac] = {'ap': ap, 'category': 'unhealthy'}
             continue
-        
+
         # Check if already upgrading
         # Mark as upgrading if upgrade_progress > 0 (actively downloading/installing)
         # We don't check upgrade_to_firmware here because it can be set from previous attempts
         upgrade_progress = device.get("upgrade_progress", 0)
         current_version = device.get("version", "")
         upgrade_to_version = device.get("upgrade_to_firmware", "")
-        
+
         is_already_upgrading = upgrade_progress and upgrade_progress > 0
-        
+
         if is_already_upgrading:
             # Store the upgrade details in the AP dict for later display
             ap_status[ap_mac] = {'ap': ap, 'category': 'already_upgrading'}
-            
+
             ap_state = get_ap_state(ap_mac)
             print(f"  [SKIP] {ap_name}: Already upgrading (state={ap_state}, progress={upgrade_progress}%)")
             # Mark as already upgrading - DO NOT re-initiate upgrades on these
             continue
-        
+
         # Check if adopted and has uptime (means it's running)
         is_adopted = device.get("adopted", False)
         uptime_seconds = device.get("uptime", 0)
-        
+
         if not is_adopted:
             print(f"  [WARN] {ap_name}: Not adopted (disconnected)")
             ap_status[ap_mac] = {'ap': ap, 'category': 'unhealthy'}
@@ -1318,85 +1383,85 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
             print(f"  [WAIT] {ap_name}: INITIALIZING (waiting to be ready...)")
             ap_status[ap_mac] = {'ap': ap, 'category': 'waiting'}
             aps_needing_wait.append(ap_mac)
-    
+
     # If any APs are still initializing, wait for them
     if aps_needing_wait:
         print(f"\nWaiting for {len(aps_needing_wait)} AP(s) to complete initialization (max {max_wait_seconds}s)...\n")
-        
+
         start_time = time.time()
-        
+
         while aps_needing_wait and (time.time() - start_time) < max_wait_seconds:
             still_waiting = []
-            
+
             # Re-fetch device data to get latest upgrade states
             all_devices = get_devices()
             device_map = {}
             for device in all_devices:
                 if device.get("type") == "uap":
                     device_map[device.get("mac", "").lower()] = device
-            
+
             for ap_mac in aps_needing_wait:
                 ap = ap_status[ap_mac]['ap']
                 ap_name = ap.get("name") or ap.get("model", "Unknown AP")
-                
+
                 device = device_map.get(ap_mac.lower())
                 if not device:
                     print(f"  [FAIL] {ap_name}: Device not found")
                     ap_status[ap_mac]['category'] = 'unhealthy'
                     continue
-                
+
                 elapsed = int(time.time() - start_time)
-                
+
                 # Check if it started upgrading while waiting
                 # Mark as upgrading if upgrade_progress > 0 (actively downloading/installing)
                 upgrade_progress = device.get("upgrade_progress", 0)
                 current_version = device.get("version", "")
                 upgrade_to_version = device.get("upgrade_to_firmware", "")
-                
+
                 is_upgrading = upgrade_progress and upgrade_progress > 0
-                
+
                 if is_upgrading:
                     print(f"  [SKIP] {ap_name}: Started upgrading while waiting ({elapsed}s)")
                     ap_status[ap_mac]['category'] = 'already_upgrading'
                     continue
-                
+
                 # Check if it now has uptime (ready to upgrade)
                 uptime_seconds = device.get("uptime", 0)
-                
+
                 if uptime_seconds and uptime_seconds > 0:
                     print(f"  [OK] {ap_name}: Ready ({elapsed}s)")
                     ap_status[ap_mac]['category'] = 'ready'
                 else:
                     # Still waiting for uptime
                     still_waiting.append(ap_mac)
-            
+
             aps_needing_wait = still_waiting
-            
+
             if aps_needing_wait:
                 # Print status line (without newline) to show waiting
                 ap_names = ", ".join(ap_status[mac]['ap'].get("name") or ap_status[mac]['ap'].get("model", "Unknown") for mac in aps_needing_wait)
                 elapsed = int(time.time() - start_time)
                 print(f"  Still waiting: {ap_names} ({elapsed}s of {max_wait_seconds}s)...", end="\r", flush=True)
                 time.sleep(5)
-        
+
         # Clear the waiting message line
         if aps_needing_wait:
             print("  " * 50, end="\r")  # Clear the line
-        
+
         # Any remaining APs that didn't transition are considered unhealthy
         if aps_needing_wait:
             ap_names = ", ".join(ap_status[mac]['ap'].get("name") or ap_status[mac]['ap'].get("model", "Unknown") for mac in aps_needing_wait)
             print(f"  [TIMEOUT] {ap_names} did not reach RUNNING state after {max_wait_seconds}s")
             for ap_mac in aps_needing_wait:
                 ap_status[ap_mac]['category'] = 'unhealthy'
-    
+
     print()  # Blank line for readability
-    
+
     # Build result lists preserving original order
     ready_aps = []
     already_upgrading = []
     unhealthy_aps = []
-    
+
     for ap in aps_to_upgrade:
         ap_mac = ap.get("mac")
         if ap_mac in ap_status:
@@ -1407,7 +1472,7 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
                 already_upgrading.append(ap)
             else:
                 unhealthy_aps.append(ap)
-    
+
     # Summary
     if unhealthy_aps:
         ap_names = ", ".join(ap.get("name") or ap.get("model", "Unknown") for ap in unhealthy_aps)
@@ -1436,10 +1501,10 @@ def check_ap_upgrade_status(ap_mac: str) -> dict:
     """
     Check the upgrade status and health of an AP.
     Useful for debugging why an upgrade might have failed.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP to check
-    
+
     Returns:
         dict: Diagnostic information about the AP's upgrade status
     """
@@ -1447,23 +1512,23 @@ def check_ap_upgrade_status(ap_mac: str) -> dict:
         devices = get_devices()
         matching_ap = None
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
-        
+
         for device in devices:
             if device.get("type") == "uap":
                 device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
                 if device_mac == target_mac_lower:
                     matching_ap = device
                     break
-        
+
         if not matching_ap:
             return {
                 "found": False,
                 "message": f"AP with MAC {ap_mac} not found"
             }
-        
+
         ap_name = matching_ap.get("name") or matching_ap.get("model", "Unknown AP")
         ap_state = matching_ap.get("state")
-        
+
         diagnostics = {
             "found": True,
             "name": ap_name,
@@ -1480,27 +1545,27 @@ def check_ap_upgrade_status(ap_mac: str) -> dict:
             "model": matching_ap.get("model"),
             "serial": matching_ap.get("serial"),
         }
-        
+
         # Check for potential issues
         issues = []
-        
+
         # State should be RUNNING
         if ap_state != "RUNNING":
             issues.append(f"AP is not in RUNNING state (current: {ap_state}). AP may need to finish boot/initialization before upgrade.")
-        
+
         if not matching_ap.get("adopted"):
             issues.append("AP is not adopted by the controller")
-        
+
         if not matching_ap.get("upgradable"):
             issues.append("AP is marked as not upgradable")
-        
+
         # Check if firmware is same as upgrade_to_firmware (already upgraded)
         if matching_ap.get("version") == matching_ap.get("upgrade_to_firmware"):
             issues.append("AP version matches upgrade_to_firmware (may already be upgraded or same version)")
-        
+
         diagnostics["issues"] = issues
         return diagnostics
-        
+
     except Exception as e:
         return {
             "found": False,
@@ -1512,7 +1577,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
     """
     Upgrades the firmware on an access point to the latest version available
     for its configured firmware channel in the controller.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP to upgrade (e.g., "aa:bb:cc:dd:ee:ff").
         dry_run (bool): If True, show what would be upgraded without actually upgrading.
@@ -1520,7 +1585,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
         skip_health_check (bool): If True, skip checking if AP is in a healthy state.
                                  Used for retries when an upgrade was dropped by the controller.
                                  Defaults to False.
-    
+
     Returns:
         dict: A dictionary containing:
             - "success" (bool): Whether the operation succeeded
@@ -1535,11 +1600,11 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
             "new_version": None,
             "message": "No AP MAC address provided"
         }
-    
+
     try:
         # Get all devices
         devices = get_devices()
-        
+
         # Find matching AP (case-insensitive MAC)
         matching_ap = None
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
@@ -1549,7 +1614,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                 if device_mac == target_mac_lower:
                     matching_ap = device
                     break
-        
+
         if not matching_ap:
             return {
                 "success": False,
@@ -1557,16 +1622,16 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                 "new_version": None,
                 "message": f"AP with MAC {ap_mac} not found"
             }
-        
+
         # Extract current firmware version and AP name
         # Try multiple field names for firmware version (UniFi uses "version" in device objects)
         current_version = matching_ap.get("version") or matching_ap.get("firmware") or matching_ap.get("fw_version")
         if not current_version:
             current_version = "Unknown"
-        
+
         ap_name = matching_ap.get("name") or matching_ap.get("model", "Unnamed AP")
         upgrade_to_firmware = matching_ap.get("upgrade_to_firmware")
-        
+
         # Check if an upgrade is already actively in progress (version mismatch + active progress)
         # We check is_ap_actively_upgrading() instead of just upgrade_triggered_by because
         # the latter is unreliable (persists across channel switches and other operations)
@@ -1580,21 +1645,21 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                 "message": f"{ap_name} already upgrading externally - monitoring only",
                 "skip_initiation": True  # Flag to indicate we didn't send an upgrade command
             }
-        
+
         # Get the firmware channel (default to "release" if not set)
         firmware_channel = matching_ap.get("fw_channel") or matching_ap.get("update_channel", "release")
-        
+
         # Fetch available firmware information from the controller
         try:
             firmware_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/firmware")
         except Exception as e:
             # If firmware endpoint doesn't work, use device's upgrade_to_firmware field instead
             firmware_data = []
-        
+
         # Find the latest firmware for this AP model/channel
         device_model = matching_ap.get("model", "")
         new_version = None
-        
+
         # Handle different response formats from firmware endpoint
         if isinstance(firmware_data, dict):
             # Sometimes firmware_data might be wrapped differently
@@ -1607,29 +1672,29 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
             firmware_list = firmware_data
         else:
             firmware_list = []
-        
+
         # Try to find matching firmware by model and channel
         if firmware_list:
             for fw in firmware_list:
                 fw_model = fw.get("model", "")
                 fw_channel = fw.get("channel", "release")
-                
+
                 # Match by model and channel
                 if fw_model == device_model and fw_channel == firmware_channel:
                     new_version = fw.get("version")
                     break
-        
+
         # If we couldn't find firmware info from the controller, try using device's upgrade_to_firmware field
         # This field is populated by UniFi when an upgrade is available
         if not new_version and upgrade_to_firmware:
             new_version = upgrade_to_firmware
-        
+
         # If we still couldn't find firmware info from the controller, assume already on latest
         if not new_version:
             # When no upgrade is available, set new_version to current_version
             # This way display logic will show "(already latest)"
             new_version = current_version
-        
+
         # Check if already on the latest version
         if current_version == new_version:
             return {
@@ -1638,7 +1703,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                 "new_version": new_version,
                 "message": f"{ap_name} is already on the latest firmware version {current_version}"
             }
-        
+
         # Handle dry run
         if dry_run:
             return {
@@ -1647,17 +1712,17 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                 "new_version": new_version,
                 "message": f"[DRY RUN] {ap_name} ({ap_mac}): Would upgrade from {current_version} to {new_version}"
             }
-        
+
         # Perform the actual firmware upgrade
         endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/devmgr"
         payload = {
             "cmd": "upgrade",
             "mac": ap_mac.lower()
         }
-        
+
         try:
             response = make_unifi_api_call("POST", endpoint, json=payload)
-            
+
             # Valid responses are:
             # - Empty list [] (common for device commands like upgrade/restart)
             # - Dict with rc="ok"
@@ -1665,7 +1730,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                 isinstance(response, list) and len(response) == 0 or
                 isinstance(response, dict) and response.get("rc") == "ok"
             )
-            
+
             if not is_valid_response:
                 return {
                     "success": False,
@@ -1673,7 +1738,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                     "new_version": new_version,
                     "message": f"Failed to initiate firmware upgrade for {ap_name}: API returned unexpected response - {response}"
                 }
-            
+
             return {
                 "success": True,
                 "current_version": current_version,
@@ -1690,14 +1755,14 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
                     "new_version": new_version,
                     "message": f"{ap_name} ({ap_mac}): Firmware upgrade initiated"
                 }
-            
+
             return {
                 "success": False,
                 "current_version": current_version,
                 "new_version": new_version,
                 "message": f"Failed to initiate firmware upgrade for {ap_name}: {e}"
             }
-        
+
     except (Exception, json.JSONDecodeError) as e:
         return {
             "success": False,
@@ -1711,15 +1776,15 @@ def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval
     """
     Continuously attempt to trigger an upgrade on an AP, retrying every retry_interval seconds
     if the AP remains in UPGRADABLE state (indicating the previous request was ignored).
-    
+
     This handles race conditions where the controller receives the upgrade request but
     doesn't process it due to timing issues or other transient problems.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP
         max_retries (int): Maximum number of upgrade attempts (default: 8 = ~2 minutes with 15s interval)
         retry_interval (int): Seconds to wait between retries (default: 15)
-    
+
     Returns:
         dict: {
             "success": bool - True if upgrade was activated or already complete,
@@ -1729,16 +1794,16 @@ def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval
         }
     """
     import time
-    
+
     attempt = 0
     start_time = time.time()
-    
+
     while attempt < max_retries:
         attempt += 1
-        
+
         # Send upgrade request
         result = upgrade_ap_firmware(ap_mac, dry_run=False)
-        
+
         if not result['success']:
             # upgrade_ap_firmware failed to send the request
             return {
@@ -1747,14 +1812,14 @@ def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval
                 "attempts": attempt,
                 "message": f"Failed to send upgrade request: {result.get('message', 'Unknown error')}"
             }
-        
+
         # Wait for the retry_interval seconds to see if AP transitions to UPGRADING
         print(f"  [ATT {attempt}] Waiting {retry_interval}s to detect upgrade activity...", end="", flush=True)
         time.sleep(retry_interval)
-        
+
         # Check current state
         current_state = get_ap_state(ap_mac)
-        
+
         if current_state == "UPGRADING":
             # Success! AP is now actively upgrading
             elapsed = int(time.time() - start_time)
@@ -1773,7 +1838,7 @@ def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval
                 if device.get("mac", "").lower() == device_mac:
                     current_version = device.get("version")
                     target_version = device.get("upgrade_to_firmware")
-                    
+
                     # Success: both version fields must be set and match
                     if current_version and target_version and current_version == target_version:
                         # Versions match - upgrade completed successfully
@@ -1822,7 +1887,7 @@ def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval
                 "attempts": attempt,
                 "message": f"AP in unexpected state: {current_state} after attempt {attempt}"
             }
-    
+
     # Max retries exceeded
     elapsed = int(time.time() - start_time)
     return {
@@ -1836,17 +1901,17 @@ def retry_upgrade_until_active(ap_mac: str, max_retries: int = 8, retry_interval
 def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
     """
     Checks if the upgrade initiation request was accepted by the controller.
-    
+
     NOTE: Due to controller limitations, this cannot definitively prove an upgrade is actually
     progressing - it can only verify that upgrade_triggered_by was set by the controller,
     indicating the request was accepted.
-    
+
     Real upgrade progress is detected in the monitoring loop via version changes or completion status.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP
         initial_state (str): The AP state before the upgrade was initiated
-        
+
     Returns:
         dict: {
             "success": bool - Whether initiation request was accepted,
@@ -1855,16 +1920,16 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
         }
     """
     import time
-    
+
     # Get initial version for reference
     initial_version = get_ap_current_version(ap_mac)
-    
+
     # Wait a moment for controller to register the upgrade request
     time.sleep(2)
-    
+
     # Check AP state - if it shows UPGRADING, the initiation was accepted
     current_ap_state = get_ap_state(ap_mac)
-    
+
     # If version already changed, upgrade completed immediately (unlikely but possible)
     current_version = get_ap_current_version(ap_mac)
     if current_version and current_version != initial_version:
@@ -1873,7 +1938,7 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
             "message": "Upgrade completed immediately (version changed)",
             "final_state": current_ap_state
         }
-    
+
     # Check if upgrade_triggered_by is set (means controller accepted the request)
     try:
         devices = get_devices()
@@ -1904,10 +1969,10 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
 def get_ap_current_version(ap_mac: str) -> str:
     """
     Get the current firmware version of an AP.
-    
+
     Args:
         ap_mac (str): The MAC address of the AP
-    
+
     Returns:
         str: The current firmware version, or None if not found
     """
@@ -1924,14 +1989,14 @@ def get_ap_current_version(ap_mac: str) -> str:
 def is_ap_actively_upgrading(ap_mac: str) -> bool:
     """
     Check if an AP has an upgrade actively in progress.
-    
+
     Uses version mismatch + upgrade progress to detect active upgrades.
     Ignores upgrade_triggered_by field as it's unreliable (persists across
     channel switches and other operations).
-    
+
     Args:
         ap_mac (str): The MAC address of the AP
-    
+
     Returns:
         bool: True if upgrade is actively in progress (version mismatch + active progress)
     """
@@ -1942,15 +2007,15 @@ def is_ap_actively_upgrading(ap_mac: str) -> bool:
                 # Check if versions differ
                 current_version = device.get("version")
                 target_version = device.get("upgrade_to_firmware")
-                
+
                 if current_version and target_version and current_version != target_version:
                     # Versions differ - check if actively upgrading
                     upgrade_progress = device.get("upgrade_progress")
                     upgrade_state = device.get("upgrade_state")
-                    
+
                     if (upgrade_progress and upgrade_progress > 0) or (upgrade_state and upgrade_state > 0):
                         return True  # Actively upgrading
-                
+
                 return False
         return False
     except Exception:

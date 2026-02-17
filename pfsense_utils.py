@@ -27,12 +27,12 @@ _config_error = None
 def _ensure_pfsense_config_loaded():
     """Load pfSense config on first use. Raises ValueError if missing."""
     global _PFSENSE_URL, _PFSENSE_APIV2_KEY, _PFSENSE_DHCP_INTERFACE, _config_loaded, _config_error
-    
+
     if _config_loaded:
         if _config_error:
             raise _config_error
         return
-    
+
     try:
         _PFSENSE_URL, _PFSENSE_APIV2_KEY, _PFSENSE_DHCP_INTERFACE = load_pfsense_config()
         _config_loaded = True
@@ -56,10 +56,10 @@ def _get_opener():
 def validate_mac_address(mac: str) -> bool:
     """
     Validate MAC address format (must use colons, e.g., 'AA:BB:CC:DD:EE:FF').
-    
+
     Args:
         mac (str): The MAC address to validate
-    
+
     Returns:
         bool: True if valid, False otherwise
     """
@@ -71,17 +71,17 @@ def _fetch_dhcp_with_retry(api_endpoint: str, headers: dict, params: dict) -> di
     Internal helper to fetch DHCP config with automatic retry on failure.
     Uses exponential backoff: 2s, 4s, 8s (max 10s between retries).
     Retried up to 3 times for non-NSS errors.
-    
+
     NSS/NSPR certificate errors are re-raised immediately without retry.
-    
+
     Args:
         api_endpoint (str): The API endpoint URL
         headers (dict): HTTP headers to send
         params (dict): Query parameters
-    
+
     Returns:
         dict: The JSON response
-    
+
     Raises:
         NSPRError: If certificate validation fails (no retry)
         Exception: If all retries are exhausted or error occurs
@@ -90,7 +90,7 @@ def _fetch_dhcp_with_retry(api_endpoint: str, headers: dict, params: dict) -> di
     max_attempts = 3
     attempt = 0
     last_error = None
-    
+
     while attempt < max_attempts:
         attempt += 1
         try:
@@ -98,15 +98,15 @@ def _fetch_dhcp_with_retry(api_endpoint: str, headers: dict, params: dict) -> di
             url = api_endpoint
             if params:
                 url += f"?{urlencode(params)}"
-            
+
             opener = _get_opener()
-            
+
             response = opener.request("GET", url, headers=headers)
             response_text = response.read().decode('utf-8')
-            
+
             if 400 <= response.getcode() < 600:
                 raise Exception(f"HTTP {response.getcode()}: {response_text}")
-            
+
             return json.loads(response_text)
         except nss.error.NSPRError as e:
             # NSS/NSPR certificate errors are not retryable - re-raise immediately
@@ -116,9 +116,9 @@ def _fetch_dhcp_with_retry(api_endpoint: str, headers: dict, params: dict) -> di
             # If this is the last attempt, raise
             if attempt >= max_attempts:
                 raise e
-            
+
             # No delay - fail fast on transient errors
-    
+
     # Shouldn't reach here
     if last_error:
         raise last_error
@@ -144,7 +144,7 @@ def get_pfsense_dhcp_static_mappings(interface_name: str = None) -> list:
     """
     # Ensure config is loaded
     _ensure_pfsense_config_loaded()
-    
+
     # Use provided interface_name or fall back to config value
     iface = interface_name if interface_name else _PFSENSE_DHCP_INTERFACE
 
