@@ -15,7 +15,7 @@ import json
 import re
 import sys
 import nss.error
-from config import UNIFI_NETWORK_URL, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_SITE_ID
+from config import UNIFI_NETWORK_URL, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_SITE_ID, DEFAULT_DOMAIN
 from http_tls_nss import NSPRNSSURLOpener
 
 try:
@@ -40,6 +40,59 @@ def cleanup():
     global _opener
     if _opener is not None:
         _opener = None
+
+
+def _normalize_dns_hostname(dns_name: str) -> str:
+    """Normalize reverse-DNS hostname for display/use as UniFi AP name."""
+    if not dns_name:
+        return ""
+    normalized = dns_name.rstrip(".")
+    if DEFAULT_DOMAIN and normalized.endswith("." + DEFAULT_DOMAIN):
+        normalized = normalized[: -(len(DEFAULT_DOMAIN) + 1)]
+    return normalized
+
+
+def is_ap_fully_adopted(device: dict) -> bool:
+    """
+    Determine whether a UniFi AP is fully adopted for controller/UI purposes.
+
+    Some controller versions report adopted=true before the UI stops offering
+    the blue Adopt button. Empirically, adopt_status==0 still means adoption
+    is not complete.
+    """
+    if not device or device.get("type") != "uap":
+        return False
+    if not device.get("adopted", False):
+        return False
+
+    # Some controller builds leave adopt_state/adopt_status at 0 long after the UI
+    # stops showing the blue Adopt button. Treat clearly operational APs as fully adopted.
+    uplink = device.get("uplink") or {}
+    uplink_up = uplink.get("up") is True
+    uplink_type = uplink.get("type") or (device.get("last_uplink") or {}).get("type")
+    has_uplink_mac = bool(
+        device.get("uplink_ap_mac")
+        or (device.get("last_uplink") or {}).get("uplink_mac")
+        or uplink.get("uplink_mac")
+    )
+    has_runtime_stats = bool(device.get("radio_table_stats")) or bool(device.get("vap_table")) or bool(device.get("stat"))
+    has_runtime_markers = bool(device.get("connection_network_name")) or bool(device.get("connect_request_ip"))
+    state = device.get("state")
+
+    if uplink_type == "wire":
+        return True
+
+    if uplink_up or has_runtime_stats or has_runtime_markers:
+        return True
+
+    if state in {1, 11} and has_uplink_mac:
+        return True
+
+    adopt_status = device.get("adopt_status")
+    adopt_state = device.get("adopt_state")
+    if adopt_status == 0 or adopt_state == 0:
+        return False
+    return True
 
 
 def validate_mac_address(mac: str) -> bool:
@@ -917,6 +970,167 @@ def restart_ap(ap_mac: str) -> dict:
         return {'success': True, 'method': 'controller'}
     except Exception as e:
         return {'success': False, 'method': None, 'error': str(e)}
+
+
+def forget_ap(ap_mac: str) -> dict:
+    """
+    Forgets a specific access point from the controller by MAC address.
+
+    Args:
+        ap_mac (str): The MAC address of the AP to forget.
+
+    Returns:
+        dict: {
+            'success': bool,
+            'error': str (if failed)
+        }
+    """
+    if not ap_mac:
+        return {'success': False, 'error': 'No MAC address provided'}
+
+    try:
+        devices = get_devices()
+        target_mac = ap_mac.lower().replace(':', '').replace('-', '')
+        matching_ap = None
+
+        for device in devices:
+            if device.get("type") != "uap":
+                continue
+            device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
+            if device_mac == target_mac:
+                matching_ap = device
+                break
+
+        if not matching_ap:
+            return {'success': False, 'error': f'AP not found: {ap_mac}'}
+
+        if not matching_ap.get("adopted", False):
+            return {
+                'success': False,
+                'skipped': True,
+                'error': 'AP is pending adoption / not adopted'
+            }
+
+        endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/sitemgr"
+        payload = {"cmd": "delete-device", "mac": ap_mac.lower()}
+        make_unifi_api_call("POST", endpoint, json=payload)
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def adopt_ap(ap_mac: str) -> dict:
+    """
+    Adopts a specific access point to the controller by MAC address.
+
+    Args:
+        ap_mac (str): The MAC address of the AP to adopt.
+
+    Returns:
+        dict: {
+            'success': bool,
+            'skipped': bool,
+            'error': str (if failed or skipped)
+        }
+    """
+    if not ap_mac:
+        return {'success': False, 'error': 'No MAC address provided'}
+
+    try:
+        devices = get_devices()
+        target_mac = ap_mac.lower().replace(':', '').replace('-', '')
+        matching_ap = None
+
+        for device in devices:
+            if device.get("type") != "uap":
+                continue
+            device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
+            if device_mac == target_mac:
+                matching_ap = device
+                break
+
+        if not matching_ap:
+            return {'success': False, 'error': f'AP not found: {ap_mac}'}
+
+        if is_ap_fully_adopted(matching_ap):
+            return {
+                'success': False,
+                'skipped': True,
+                'error': 'AP is already adopted'
+            }
+
+        endpoint = f"/api/s/{UNIFI_SITE_ID}/cmd/devmgr"
+        payload = {"cmd": "adopt", "mac": ap_mac.lower()}
+        make_unifi_api_call("POST", endpoint, json=payload)
+        return {'success': True}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def set_ap_name_from_reverse_dns(ap_mac: str) -> dict:
+    """
+    Rename an adopted AP from its reverse-DNS hostname when available.
+
+    Returns:
+        dict: {
+            'success': bool,
+            'skipped': bool,
+            'name': str (new name when success),
+            'error': str
+        }
+    """
+    if not ap_mac:
+        return {'success': False, 'error': 'No MAC address provided'}
+
+    try:
+        devices = get_devices()
+        target_mac = ap_mac.lower().replace(':', '').replace('-', '')
+        matching_ap = None
+
+        for device in devices:
+            if device.get("type") != "uap":
+                continue
+            device_mac = device.get("mac", "").lower().replace(':', '').replace('-', '')
+            if device_mac == target_mac:
+                matching_ap = device
+                break
+
+        if not matching_ap:
+            return {'success': False, 'error': f'AP not found: {ap_mac}'}
+
+        ap_ip = matching_ap.get("ip")
+        if not ap_ip:
+            return {'success': False, 'skipped': True, 'error': 'AP has no IP address'}
+
+        try:
+            dns_name = socket.gethostbyaddr(ap_ip)[0]
+        except (socket.herror, socket.gaierror):
+            return {'success': False, 'skipped': True, 'error': 'No reverse DNS'}
+        except Exception as e:
+            return {'success': False, 'skipped': True, 'error': f'Reverse DNS lookup failed: {e}'}
+
+        desired_name = _normalize_dns_hostname(dns_name)
+        if not desired_name:
+            return {'success': False, 'skipped': True, 'error': 'Reverse DNS hostname was empty'}
+
+        current_name = matching_ap.get("name") or matching_ap.get("model", "")
+        default_name = matching_ap.get("model", "")
+        if current_name and current_name != default_name:
+            return {'success': False, 'skipped': True, 'error': 'AP already has a non-default name'}
+        if current_name == desired_name:
+            return {'success': False, 'skipped': True, 'error': 'AP name already matches reverse DNS'}
+
+        device_id = matching_ap.get("_id")
+        if not device_id:
+            return {'success': False, 'error': f'AP has no device ID: {ap_mac}'}
+
+        endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/device/{device_id}"
+        payload = matching_ap.copy()
+        payload["name"] = desired_name
+        make_unifi_api_call("PUT", endpoint, json=payload)
+        return {'success': True, 'name': desired_name}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
 
 def restart_ap_via_ssh(ap_ip: str, ssh_username: str, ssh_password: str, timeout: int = 30) -> dict:
     """

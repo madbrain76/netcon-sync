@@ -18,7 +18,17 @@ device_categories = [
 def create_smokeping_section(f_stream, section_name, title, mappings):
     """
     Create a section for SmokePing with DHCP mappings.
-    f_stream: The file-like object to write to (e.g., sys.stdout).
+
+    For access points (hostnames starting with "ap-"), this function adds
+    "alerts = hostdown" to trigger SmokePing hostdown alerts when the AP goes offline.
+    IMPORTANT: Ensure your SmokePing configuration includes the "hostdown" alert
+    definition for these alerts to work properly.
+
+    Args:
+        f_stream: The file-like object to write to (e.g., sys.stdout)
+        section_name: Category name (wired, wifi, bridged, other)
+        title: Display title for the section
+        mappings: List of DHCP static mapping dictionaries
     """
     if not mappings:
         return  # Skip writing the section if there are no mappings
@@ -53,11 +63,13 @@ def create_smokeping_section(f_stream, section_name, title, mappings):
 
         # Sanitize hostname for subsection name (replace spaces with underscores)
         subsection_name = f"{hostname.replace(' ', '_')}"
+        alert_line = "alerts = hostdown\n" if hostname.lower().startswith("ap-") else ""
 
         f_stream.write(
             f"++ {subsection_name}\n"
             f"menu = {menu}\n"  # Use sanitized description/hostname for menu
             f"title = {hostname} ({ip_address})\n"
+            f"{alert_line}"
             f"host = {ip_address}\n"
             f"# MAC Address: {mac_address}\n\n"
         )

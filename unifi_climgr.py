@@ -2701,6 +2701,31 @@ AVAILABLE ACTIONS:
               If neither --ap_mac nor --ap_name is specified, restarts all APs (use with caution!)
               For mesh networks, APs restart in mesh order (leaf to parent) with 5s delay between layers
 
+  forget_ap   Forget access points from the controller
+              Usage: forget_ap [--ap_mac <MAC> | --ap_name <NAME>] [--actual_forget]
+              Options:
+                --ap_mac <MAC>         Forget AP by MAC address
+                --ap_name <NAME>       Forget AP by name
+                --actual_forget       Actually perform the forget (default is dry run)
+              Removes all APs from the controller in mesh order (leaf to parent)
+              with a 30 second delay between depth layers
+              Default behavior is DRY RUN (shows what would be forgotten without making changes)
+
+  adopt_ap    Adopt access points to the controller
+              Usage: adopt_ap [--ap_mac <MAC> | --ap_name <NAME>]
+              Options:
+                --ap_mac <MAC>         Adopt AP by MAC address
+                --ap_name <NAME>       Adopt AP by name
+                --sequence_timeout <S> Wait for mesh APs to appear for up to S seconds (default: 900)
+              If neither --ap_mac nor --ap_name is specified, adopts all visible APs
+              by issuing wired AP adoptions first, then polling for mesh APs
+              to appear and adopting them sequentially.
+              After adoption, AP names are automatically set from reverse DNS if the AP
+              doesn't already have a custom name. A custom name may have been set by:
+                - pfsense2unifi sync (from pfSense DHCP reservations)
+                - A restored UniFi configuration backup
+                - Manual configuration in the UniFi UI
+
   upgrade_ap  Upgrade AP firmware to latest available version on configured channel
               Usage: upgrade_ap [--ap_mac <MAC> | --ap_name <NAME>] [--actual_upgrade]
               Options:
@@ -2720,6 +2745,7 @@ AVAILABLE ACTIONS:
                 --filter_name <NAME>   Enable SSIDs/APs matching this name (substring match)
                 --filter_mac <MAC>     Enable AP by MAC address (substring match, APs only)
               Note: Omit filters to enable ALL SSIDs or APs
+              For SSIDs, this sets the enabled=true flag in the WLAN configuration.
 
   disable     Disable wireless networks (SSIDs) or access points (APs)
               Usage: disable (--ssids | --aps) [<NAME> | --filter_name <NAME>] [--filter_mac <MAC>]
@@ -2730,6 +2756,7 @@ AVAILABLE ACTIONS:
                 --filter_name <NAME>   Disable SSIDs/APs matching this name (substring match)
                 --filter_mac <MAC>     Disable AP by MAC address (substring match, APs only)
               Note: Omit filters to disable ALL SSIDs or APs
+              For SSIDs, this sets the enabled=false flag in the WLAN configuration.
 
 EXAMPLES:
 
@@ -2786,6 +2813,18 @@ EXAMPLES:
 
   # Restart all APs (WARNING: network disruption! Mesh networks restart in order)
   ./unifi_climgr.py restart_ap
+
+  # Dry run: preview forgetting all APs in mesh order
+  ./unifi_climgr.py forget_ap
+
+  # Dry run: preview forgetting a specific AP by MAC
+  ./unifi_climgr.py forget_ap --ap_mac aa:bb:cc:dd:ee:ff
+
+  # Actually forget all APs in mesh order
+  ./unifi_climgr.py forget_ap --actual_forget
+
+  # Adopt all APs (wired first, then mesh as they appear)
+  ./unifi_climgr.py adopt_ap
 
   # Dry run: preview what firmware updates would be applied (default behavior)
   ./unifi_climgr.py upgrade_ap --ap_mac aa:bb:cc:dd:ee:ff
@@ -3067,6 +3106,41 @@ EXAMPLES:
     restart_ap_target = restart_ap_parser.add_mutually_exclusive_group(required=False)
     restart_ap_target.add_argument('--ap_mac', type=str, help='Restart AP by MAC address')
     restart_ap_target.add_argument('--ap_name', type=str, help='Restart AP by name')
+
+    # ============================================================================
+    # FORGET_AP action
+    # ============================================================================
+    forget_ap_parser = subparsers.add_parser(
+        'forget_ap',
+        help='Forget access points from the controller',
+        allow_abbrev=False
+    )
+    forget_ap_target = forget_ap_parser.add_mutually_exclusive_group(required=False)
+    forget_ap_target.add_argument('--ap_mac', type=str, help='Forget AP by MAC address')
+    forget_ap_target.add_argument('--ap_name', type=str, help='Forget AP by name')
+    forget_ap_parser.add_argument(
+        '--actual_forget',
+        action='store_true',
+        help='Actually perform the forget (default is dry run)'
+    )
+
+    # ============================================================================
+    # ADOPT_AP action
+    # ============================================================================
+    adopt_ap_parser = subparsers.add_parser(
+        'adopt_ap',
+        help='Adopt access points to the controller',
+        allow_abbrev=False
+    )
+    adopt_ap_target = adopt_ap_parser.add_mutually_exclusive_group(required=False)
+    adopt_ap_target.add_argument('--ap_mac', type=str, help='Adopt AP by MAC address')
+    adopt_ap_target.add_argument('--ap_name', type=str, help='Adopt AP by name')
+    adopt_ap_parser.add_argument(
+        '--sequence_timeout',
+        type=int,
+        default=900,
+        help='Wait for mesh APs to appear for up to this many seconds when adopting all APs (default: 900)'
+    )
 
     # ============================================================================
     # UPGRADE_AP action
@@ -3612,6 +3686,397 @@ EXAMPLES:
                                     print("[FAIL] No SSH credentials available")
                             else:
                                 print(f"    No IP address available for SSH fallback")
+            sys.exit(0)
+
+        # =====================================================================
+        # FORGET_AP action
+        # =====================================================================
+        if args.action == 'forget_ap':
+            print("Fetching UniFi devices...")
+            all_devices = unifi_utils.get_devices()
+            aps = [device for device in all_devices if device.get("type") == "uap"]
+
+            if not aps:
+                print("No Access Points found.")
+                sys.exit(0)
+
+            if args.ap_mac:
+                target_mac = args.ap_mac.lower()
+                matching_aps = [ap for ap in aps if ap.get("mac", "").lower() == target_mac]
+                if not matching_aps:
+                    print(f"Error: No AP found with MAC {args.ap_mac}")
+                    sys.exit(1)
+                aps_to_forget = matching_aps
+            elif args.ap_name:
+                matching_aps = [ap for ap in aps if (ap.get("name") or ap.get("model", "")).lower() == args.ap_name.lower()]
+                if not matching_aps:
+                    print(f"Error: No AP found with name '{args.ap_name}'")
+                    sys.exit(1)
+                aps_to_forget = matching_aps
+            else:
+                aps_to_forget = aps
+
+            if len(aps_to_forget) > 1:
+                print()
+                display_ap_tree(aps_to_forget, all_devices)
+
+            # Calculate depths against the full AP inventory so targeted forgets
+            # still retain their real mesh position instead of being mislabeled
+            # as orphans when their parent AP is outside the selected subset.
+            depths = calculate_ap_mesh_depths(aps)
+            aps_by_depth = defaultdict(list)
+            for ap in aps_to_forget:
+                ap_mac = ap.get("mac")
+                depth = depths.get(ap_mac, -1)
+                aps_by_depth[depth].append(ap)
+
+            sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
+
+            mode_str = "ACTUAL:" if args.actual_forget else "DRY RUN:"
+            print(f"\n{mode_str} Forgetting {len(aps_to_forget)} AP(s) in mesh order (leaf to parent)...\n")
+
+            for i, depth in enumerate(sorted_depths):
+                layer_aps = aps_by_depth[depth]
+
+                if depth == -1:
+                    depth_label = "Orphan"
+                elif depth == 0:
+                    depth_label = "Wired Root"
+                else:
+                    depth_label = f"Mesh Depth {depth}"
+
+                print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
+                for ap in layer_aps:
+                    ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                    ap_mac = ap.get("mac")
+                    if not ap_mac:
+                        print(f"  {ap_name}... [FAIL] missing MAC address")
+                        continue
+
+                    if not args.actual_forget:
+                        print(f"  {ap_name} ({ap_mac}) [DRY RUN]")
+                        continue
+
+                    print(f"  {ap_name}... ", end="", flush=True)
+                    result = unifi_utils.forget_ap(ap_mac)
+                    if result['success']:
+                        print("[OK]")
+                    elif result.get('skipped'):
+                        print(f"[SKIP] {result.get('error', 'skipped')}")
+                    else:
+                        print(f"[FAIL] {result.get('error', 'unknown error')}")
+
+                if args.actual_forget and i < len(sorted_depths) - 1:
+                    print("  Waiting 30 seconds before next layer...\n")
+                    time.sleep(30)
+
+            if args.actual_forget:
+                print("\nAll APs processed for forget_ap.")
+            else:
+                print("\nDry run complete. Re-run with --actual_forget to perform the forget.")
+            sys.exit(0)
+
+        # =====================================================================
+        # ADOPT_AP action
+        # =====================================================================
+        if args.action == 'adopt_ap':
+            print("Fetching UniFi devices...")
+            all_devices = unifi_utils.get_devices()
+            aps = [device for device in all_devices if device.get("type") == "uap"]
+
+            if not aps:
+                print("No Access Points found.")
+                sys.exit(0)
+
+            if args.ap_mac:
+                target_mac = args.ap_mac.lower()
+                matching_aps = [ap for ap in aps if ap.get("mac", "").lower() == target_mac]
+                if not matching_aps:
+                    print(f"Error: No AP found with MAC {args.ap_mac}")
+                    sys.exit(1)
+                aps_to_adopt = matching_aps
+            elif args.ap_name:
+                matching_aps = [ap for ap in aps if (ap.get("name") or ap.get("model", "")).lower() == args.ap_name.lower()]
+                if not matching_aps:
+                    print(f"Error: No AP found with name '{args.ap_name}'")
+                    sys.exit(1)
+                aps_to_adopt = matching_aps
+            else:
+                aps_to_adopt = aps
+
+            if len(aps_to_adopt) > 1:
+                print()
+                display_ap_tree(aps_to_adopt, all_devices)
+
+            use_default_order = (not args.ap_mac and not args.ap_name)
+
+            def _print_adopt_result(ap, result):
+                ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                if result['success']:
+                    print(f"  {ap_name}... [OK] adoption initiated")
+                elif result.get('skipped'):
+                    print(f"  {ap_name}... [SKIP] {result.get('error', 'skipped')}")
+                else:
+                    print(f"  {ap_name}... [FAIL] {result.get('error', 'unknown error')}")
+
+            def _wait_for_ap_adoption(ap_mac, timeout_seconds, require_parent_link=False):
+                deadline = time.time() + timeout_seconds
+                target_mac = ap_mac.lower()
+
+                while time.time() < deadline:
+                    current_devices = unifi_utils.get_devices()
+                    matching_ap = None
+                    for device in current_devices:
+                        if device.get("type") != "uap":
+                            continue
+                        device_mac = device.get("mac", "").lower()
+                        if device_mac == target_mac:
+                            matching_ap = device
+                            break
+
+                    if matching_ap and unifi_utils.is_ap_fully_adopted(matching_ap):
+                        uplink_mac = (
+                            matching_ap.get("uplink_ap_mac")
+                            or matching_ap.get("last_uplink", {}).get("uplink_mac")
+                            or matching_ap.get("uplink", {}).get("uplink_mac")
+                        )
+                        uplink_type = (
+                            matching_ap.get("uplink", {}).get("type")
+                            or matching_ap.get("last_uplink", {}).get("type")
+                        )
+                        if require_parent_link and not uplink_mac and uplink_type != "wire":
+                            time.sleep(5)
+                            continue
+                        readiness = "wired" if uplink_type == "wire" else ("linked" if uplink_mac else "adopted")
+                        return True, readiness
+
+                    time.sleep(5)
+
+                final_state = unifi_utils.get_ap_state(ap_mac)
+                return False, final_state
+
+            def _maybe_set_ap_name_from_dns(ap_mac):
+                """
+                Set AP name from reverse DNS if the AP doesn't already have a custom name.
+                This function looks up the AP's IP address, performs a reverse DNS lookup,
+                and renames the AP to the resolved hostname if it currently has only the
+                default model name. APs that already have a custom name will be skipped.
+                A custom name may have been set by:
+                  - pfsense2unifi sync (from pfSense DHCP reservations)
+                  - A restored UniFi configuration backup
+                  - Manual configuration in the UniFi UI
+                """
+                rename_result = unifi_utils.set_ap_name_from_reverse_dns(ap_mac)
+                if rename_result.get('success'):
+                    print(f"    [OK] AP name set from reverse DNS: {rename_result.get('name')}")
+                elif not rename_result.get('skipped'):
+                    print(f"    [WARN] Failed to set AP name from reverse DNS: {rename_result.get('error', 'unknown error')}")
+
+            def _format_adopt_wait_error(result):
+                error = result.get('error', 'not ready yet')
+                if 'HTTP Error 400' in error:
+                    return 'not ready for adoption yet'
+                if error.startswith('Network or API error during POST'):
+                    return 'not ready for adoption yet'
+                return error
+
+            if use_default_order:
+                fully_adopted_aps = [ap for ap in aps_to_adopt if unifi_utils.is_ap_fully_adopted(ap)]
+                pending_aps = [ap for ap in aps_to_adopt if not unifi_utils.is_ap_fully_adopted(ap)]
+                root_aps = []
+                for ap in pending_aps:
+                    uplink_type = (
+                        ap.get("uplink", {}).get("type")
+                        or ap.get("last_uplink", {}).get("type")
+                    )
+                    if ap.get("wired") is True or uplink_type == "wire":
+                        root_aps.append(ap)
+                processed_macs = {
+                    ap.get("mac", "").lower()
+                    for ap in fully_adopted_aps
+                    if ap.get("mac")
+                }
+                retry_after = {}
+                initiated_adoptions = set()
+
+                print(f"\nAdopting all APs: visible wired/root APs first, then newly appearing APs sequentially (timeout: {args.sequence_timeout}s)...\n")
+                if fully_adopted_aps:
+                    print(f"Already fully adopted: {len(fully_adopted_aps)} AP(s) will be skipped.\n")
+                all_known_already_adopted = len(fully_adopted_aps) == len(aps_to_adopt)
+                if all_known_already_adopted:
+                    print("All currently known APs are already fully adopted.")
+                    print("Waiting for any newly appearing mesh APs. Abort manually if no more APs are expected.\n")
+
+                if root_aps:
+                    print(f"Initial visible AP batch ({len(root_aps)} AP{'s' if len(root_aps) != 1 else ''})")
+                    root_aps_to_confirm = []
+                    for ap in root_aps:
+                        ap_mac = ap.get("mac")
+                        if not ap_mac:
+                            _print_adopt_result(ap, {'success': False, 'error': 'missing MAC address'})
+                            continue
+                        result = unifi_utils.adopt_ap(ap_mac)
+                        _print_adopt_result(ap, result)
+                        if result['success']:
+                            root_aps_to_confirm.append((ap, True))
+                        elif result.get('skipped') and result.get('error') == 'AP is already adopted':
+                            processed_macs.add(ap_mac.lower())
+
+                    for ap, rename_after_confirm in root_aps_to_confirm:
+                        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                        ap_mac = ap.get("mac")
+                        if not ap_mac:
+                            continue
+                        print(f"  Waiting for {ap_name} to finish adoption...", flush=True)
+                        adopted_ok, adopted_state = _wait_for_ap_adoption(ap_mac, 180, require_parent_link=False)
+                        if adopted_ok:
+                            print(f"    [OK] {ap_name} reached {adopted_state}")
+                            processed_macs.add(ap_mac.lower())
+                            if rename_after_confirm:
+                                _maybe_set_ap_name_from_dns(ap_mac)
+                        else:
+                            print(f"    [WAIT] {ap_name} did not finish adoption yet (state: {adopted_state})")
+                            retry_after[ap_mac.lower()] = time.time() + 30
+
+                discovery_deadline = time.time() + args.sequence_timeout
+                print("New AP discovery/adoption sequence")
+                while time.time() < discovery_deadline:
+                    current_devices = unifi_utils.get_devices()
+                    current_aps = [device for device in current_devices if device.get("type") == "uap"]
+                    candidate_aps = []
+                    now = time.time()
+
+                    for ap in current_aps:
+                        ap_mac = ap.get("mac", "").lower()
+                        if not ap_mac or ap_mac in processed_macs:
+                            continue
+                        if now < retry_after.get(ap_mac, 0):
+                            continue
+                        candidate_aps.append(ap)
+
+                    candidate_aps.sort(key=lambda ap: (0 if ap.get("ip") else 1, ap.get("mac", "")))
+
+                    if not candidate_aps:
+                        remaining = max(0, int(discovery_deadline - time.time()))
+                        if remaining == 0:
+                            break
+                        known_pending_aps = [
+                            ap for ap in current_aps
+                            if ap.get("mac", "").lower() not in processed_macs
+                        ]
+                        if known_pending_aps:
+                            print(f"  All currently known APs are already adopted or still settling. Waiting 15 seconds... ({remaining}s remaining)")
+                        else:
+                            print(f"  No new APs discovered yet. Waiting 15 seconds... ({remaining}s remaining)")
+                        time.sleep(min(15, remaining))
+                        continue
+
+                    adopted_this_cycle = False
+                    not_ready_aps = []
+                    selected_ap = None
+                    selected_result = None
+                    for next_ap in candidate_aps:
+                        ap_name = next_ap.get("name") or next_ap.get("model", "Unknown AP")
+                        ap_mac = next_ap.get("mac")
+                        result = unifi_utils.adopt_ap(ap_mac)
+                        if result['success']:
+                            selected_ap = next_ap
+                            selected_result = result
+                            break
+                        if result.get('skipped') and result.get('error') == 'AP is already adopted':
+                            if ap_mac.lower() in initiated_adoptions:
+                                selected_ap = next_ap
+                                selected_result = result
+                                break
+                            if unifi_utils.is_ap_fully_adopted(next_ap):
+                                processed_macs.add(ap_mac.lower())
+                                continue
+                            wait_reason = "adoption already initiated, waiting for completion"
+                            not_ready_aps.append((ap_name, wait_reason))
+                            retry_after[ap_mac.lower()] = time.time() + 30
+                            continue
+
+                        wait_reason = _format_adopt_wait_error(result)
+                        not_ready_aps.append((ap_name, wait_reason))
+                        retry_after[ap_mac.lower()] = time.time() + 30
+
+                    if not_ready_aps:
+                        print("  Not ready this cycle: " + ", ".join(f"{name} ({reason})" for name, reason in not_ready_aps))
+
+                    if selected_ap is not None and selected_result is not None:
+                        ap_name = selected_ap.get("name") or selected_ap.get("model", "Unknown AP")
+                        ap_mac = selected_ap.get("mac")
+                        print(f"  {ap_name}... ", end="", flush=True)
+                        result = selected_result
+                        if result['success']:
+                            initiated_adoptions.add(ap_mac.lower())
+                            print("[OK] adoption initiated")
+                            print(f"    Waiting for {ap_name} to finish adoption...", flush=True)
+                            adopted_ok, adopted_state = _wait_for_ap_adoption(ap_mac, 300, require_parent_link=True)
+                            if adopted_ok:
+                                print(f"    [OK] {ap_name} reached {adopted_state}")
+                                processed_macs.add(ap_mac.lower())
+                                _maybe_set_ap_name_from_dns(ap_mac)
+                                adopted_this_cycle = True
+                            else:
+                                print(f"    [WAIT] {ap_name} did not finish adoption yet (state: {adopted_state})")
+                                retry_after[ap_mac.lower()] = time.time() + 30
+                        elif result.get('skipped') and result.get('error') == 'AP is already adopted':
+                            if ap_mac.lower() in initiated_adoptions:
+                                print("[OK] adoption completed")
+                                processed_macs.add(ap_mac.lower())
+                                adopted_this_cycle = True
+                            elif unifi_utils.is_ap_fully_adopted(selected_ap):
+                                print(f"[SKIP] {result.get('error')}")
+                                processed_macs.add(ap_mac.lower())
+                            else:
+                                print("[WAIT] adoption already initiated, waiting for completion")
+                                print(f"    Waiting for {ap_name} to finish adoption...", flush=True)
+                                adopted_ok, adopted_state = _wait_for_ap_adoption(ap_mac, 300, require_parent_link=True)
+                                if adopted_ok:
+                                    print(f"    [OK] {ap_name} reached {adopted_state}")
+                                    processed_macs.add(ap_mac.lower())
+                                    initiated_adoptions.add(ap_mac.lower())
+                                    adopted_this_cycle = True
+                                else:
+                                    print(f"    [WAIT] {ap_name} did not finish adoption yet (state: {adopted_state})")
+                                    retry_after[ap_mac.lower()] = time.time() + 30
+                        else:
+                            wait_reason = _format_adopt_wait_error(result)
+                            print(f"[WAIT] {wait_reason}")
+                            retry_after[ap_mac.lower()] = time.time() + 30
+
+                    remaining = max(0, int(discovery_deadline - time.time()))
+                    if remaining > 0:
+                        if adopted_this_cycle:
+                            print("  Waiting 15 seconds before checking for the next AP...\n")
+                        else:
+                            print("  No AP accepted adoption this cycle. Waiting 15 seconds...\n")
+                        time.sleep(min(15, remaining))
+                else:
+                    pass
+
+                if time.time() >= discovery_deadline:
+                    print(f"\nAdoption sequence timeout reached after {args.sequence_timeout} seconds.")
+            else:
+                print(f"\nAdopting {len(aps_to_adopt)} AP(s)...\n")
+                for ap in aps_to_adopt:
+                    ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                    ap_mac = ap.get("mac")
+                    if not ap_mac:
+                        print(f"  {ap_name}... [FAIL] missing MAC address")
+                        continue
+
+                    print(f"  {ap_name}... ", end="", flush=True)
+                    result = unifi_utils.adopt_ap(ap_mac)
+                    if result['success']:
+                        print("[OK]")
+                    elif result.get('skipped'):
+                        print(f"[SKIP] {result.get('error', 'skipped')}")
+                    else:
+                        print(f"[FAIL] {result.get('error', 'unknown error')}")
+
+            print("\nAll APs processed for adopt_ap.")
             sys.exit(0)
 
         # =====================================================================

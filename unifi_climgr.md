@@ -420,6 +420,24 @@ This prevents mesh APs from losing their uplink connection prematurely.
 - For wired APs: Restart immediately (they have no uplink to lose)
 - For mixed networks: This ordering ensures mesh APs don't lose their parent AP mid-restart
 
+### Forget APs
+
+**Purpose**: Remove all access points from the controller's adoption database.
+
+```bash
+# Forget ALL APs (WARNING: removes AP adoption from the controller!)
+./unifi_climgr.py forget_ap
+```
+
+**Mesh Forget Details**:
+- APs are forgotten in mesh order, deepest layer first
+- The tool waits 30 seconds between depth layers
+- Wired root APs are processed last so mesh children are removed before their uplinks
+
+**Use when**:
+- You want to fully clear AP adoption state from the controller
+- You need to reprovision a mesh network from the leaves inward
+
 ---
 
 ## SSID Management Commands
