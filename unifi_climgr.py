@@ -2001,6 +2001,63 @@ def ping_ap_offline(ap_mac: str, ap_name: str, ap_ip: str, offline_timeout: int 
     return {'success': False, 'message': f'still pingable or unstable after {offline_timeout}s'}
 
 
+def _has_selected_ap_radio_channels(device: dict) -> bool:
+    """
+    Return True only when the AP exposes concrete numeric channels for its radios.
+
+    Adoption can appear "done" in some controller fields before the GUI shows
+    the AP's selected channels. Restrict readiness to radio_table channel values
+    that are actual positive integers and require at least one such channel.
+    """
+    radio_table = device.get("radio_table")
+    if not isinstance(radio_table, list) or not radio_table:
+        return False
+
+    found_numeric_channel = False
+    for radio in radio_table:
+        if not isinstance(radio, dict):
+            continue
+
+        channel = radio.get("channel")
+        try:
+            channel_num = int(str(channel).strip())
+        except (TypeError, ValueError):
+            return False
+
+        if channel_num <= 0:
+            return False
+
+        found_numeric_channel = True
+
+    return found_numeric_channel
+
+
+def _is_ap_adoption_complete(device: dict, require_parent_link: bool = False) -> bool:
+    """Return True only when an AP is fully adopted and operationally ready."""
+    if not device or not unifi_utils.is_ap_fully_adopted(device):
+        return False
+
+    if not device.get("ip"):
+        return False
+
+    if not _has_selected_ap_radio_channels(device):
+        return False
+
+    uplink_mac = (
+        device.get("uplink_ap_mac")
+        or device.get("last_uplink", {}).get("uplink_mac")
+        or device.get("uplink", {}).get("uplink_mac")
+    )
+    uplink_type = (
+        device.get("uplink", {}).get("type")
+        or device.get("last_uplink", {}).get("type")
+    )
+    if require_parent_link and not uplink_mac and uplink_type != "wire":
+        return False
+
+    return True
+
+
 def _get_multi_level_sort_key(row_data: dict, display_columns: list) -> tuple:
     """
     Generate a multi-level sort key tuple for a client row.
@@ -2800,12 +2857,16 @@ AVAILABLE ACTIONS:
                 --note <NOTE>          Client note/description (optional)
 
   restart_ap  Restart access points
-              Usage: restart_ap [--ap_mac <MAC> | --ap_name <NAME>]
+              Usage: restart_ap [--ap_mac <MAC> | --ap_name <NAME>] [--verify_offline | --no_verify_offline] [--offline_timeout <S>]
               Options:
                 --ap_mac <MAC>         Restart AP by MAC address
                 --ap_name <NAME>       Restart AP by name
+                --verify_offline       Verify APs are offline before next layer (default)
+                --no_verify_offline    Skip offline verification
+                --offline_timeout <S>  Wait up to S seconds for 10s of no ping replies (default: 60)
               If neither --ap_mac nor --ap_name is specified, restarts all APs (use with caution!)
-              For mesh networks, APs restart in mesh order (leaf to parent) with 5s delay between layers
+              APs restart in mesh order (leaf to parent), and each layer must go offline
+              before the next layer is processed unless verification is disabled.
 
   adopt_ap    Adopt access points to the controller
               Usage: adopt_ap [--ap_mac <MAC> | --ap_name <NAME>]
@@ -3324,6 +3385,24 @@ EXAMPLES:
     restart_ap_target = restart_ap_parser.add_mutually_exclusive_group(required=False)
     restart_ap_target.add_argument('--ap_mac', type=str, help='Restart AP by MAC address')
     restart_ap_target.add_argument('--ap_name', type=str, help='Restart AP by name')
+    restart_ap_parser.add_argument(
+        '--verify_offline',
+        action='store_true',
+        default=True,
+        help='Verify APs are offline before moving to the next depth layer (default: enabled)'
+    )
+    restart_ap_parser.add_argument(
+        '--no_verify_offline',
+        action='store_false',
+        dest='verify_offline',
+        help='Skip offline verification'
+    )
+    restart_ap_parser.add_argument(
+        '--offline_timeout',
+        type=int,
+        default=60,
+        help='Maximum seconds to wait for AP to stay offline for 10s (default: 60)'
+    )
 
  
     # ============================================================================
@@ -3924,101 +4003,118 @@ LIMITATIONS:
                 print()
                 display_ap_tree(aps_to_restart, all_devices)
 
-            # Check if there are any mesh APs (depth >= 1)
+            # Calculate depths against the selected AP inventory so restart sequencing
+            # matches the visible mesh topology we are operating on.
             depths = calculate_ap_mesh_depths(aps_to_restart)
-            has_mesh_aps = any(depth >= 1 for depth in depths.values())
+            aps_by_depth = defaultdict(list)
+            for ap in aps_to_restart:
+                ap_mac = ap.get("mac")
+                depth = depths.get(ap_mac, -1)
+                aps_by_depth[depth].append(ap)
 
-            # Use mesh-ordered restart if there are mesh APs and we're restarting all APs (not a specific one)
-            use_mesh_order = (has_mesh_aps and not args.ap_mac and not args.ap_name)
+            sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
+            verify_str = "WITH OFFLINE VERIFICATION" if args.verify_offline else "NO OFFLINE VERIFICATION"
+            print(f"\nRestarting {len(aps_to_restart)} AP(s) in mesh order (leaf to parent)...\n")
+            print(f"Offline verification: {verify_str} (wait up to {args.offline_timeout}s for 10s offline)\n")
 
-            if use_mesh_order and not args.ap_mac and not args.ap_name:
-                import time
-                print(f"\nRestarting {len(aps_to_restart)} AP(s) in mesh order (leaf to parent)...\n")
+            ssh_username, ssh_password = None, None
 
-                # Group APs by depth
-                aps_by_depth = defaultdict(list)
-                for ap in aps_to_restart:
-                    ap_mac = ap.get("mac")
-                    depth = depths.get(ap_mac, -1)
-                    aps_by_depth[depth].append(ap)
+            for i, depth in enumerate(sorted_depths):
+                layer_aps = aps_by_depth[depth]
 
-                # Sort depths (deepest/highest numbers first, which means leaf to parent)
-                sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
+                if depth == -1:
+                    depth_label = "Orphan"
+                elif depth == 0:
+                    depth_label = "Wired Root"
+                else:
+                    depth_label = f"Mesh Depth {depth}"
 
-                for i, depth in enumerate(sorted_depths):
-                    layer_aps = aps_by_depth[depth]
-
-                    if depth == -1:
-                        depth_label = "Orphan"
-                    elif depth == 0:
-                        depth_label = "Wired Root"
-                    else:
-                        depth_label = f"Mesh Depth {depth}"
-                    print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
-                    for ap in layer_aps:
-                        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
-                        ap_mac = ap.get("mac")
-                        ap_ip = ap.get("ip")
-                        if ap_mac:
-                            print(f"  {ap_name}... ", end="", flush=True)
-                            result = unifi_utils.restart_ap(ap_mac)
-                            if result['success']:
-                                print(f"[OK] via {result['method']}")
-                            else:
-                                # Try SSH fallback
-                                print(f"[FAIL] via controller ({result.get('error', 'unknown error')})")
-                                if ap_ip:
-                                    print(f"    Trying SSH fallback to {ap_ip}... ", end="", flush=True)
-                                    # Get SSH credentials if not already retrieved
-                                    if 'ssh_username' not in locals():
-                                        ssh_username, ssh_password = get_ssh_credentials()
-                                    if ssh_username and ssh_password:
-                                        ssh_result = unifi_utils.restart_ap_via_ssh(ap_ip, ssh_username, ssh_password)
-                                        if ssh_result['success']:
-                                            print(f"[OK] via {ssh_result['method']}")
-                                        else:
-                                            print(f"[FAIL] {ssh_result.get('error', 'unknown error')}")
-                                    else:
-                                        print("[FAIL] No SSH credentials available")
-                                else:
-                                    print(f"    No IP address available for SSH fallback")
-                    # Add 15-second delay between layers (but not after the last layer)
-                    if i < len(sorted_depths) - 1:
-                        print("  Waiting 15 seconds before next layer...\n")
-                        time.sleep(15)
-                print("\nAll APs restarted in mesh order.")
-            else:
-                # Standard restart without mesh ordering
-                print(f"\nRestarting {len(aps_to_restart)} AP(s)...")
-                # Get SSH credentials once if needed for fallback
-                ssh_username, ssh_password = None, None
-                for ap in aps_to_restart:
+                print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
+                for ap in layer_aps:
                     ap_name = ap.get("name") or ap.get("model", "Unknown AP")
                     ap_mac = ap.get("mac")
                     ap_ip = ap.get("ip")
-                    if ap_mac:
-                        print(f"  {ap_name}... ", end="", flush=True)
-                        result = unifi_utils.restart_ap(ap_mac)
-                        if result['success']:
-                            print(f"[OK] via {result['method']}")
-                        else:
-                            # Try SSH fallback
-                            print(f"[FAIL] via controller ({result.get('error', 'unknown error')})")
-                            if ap_ip:
-                                print(f"    Trying SSH fallback to {ap_ip}... ", end="", flush=True)
-                                # Get SSH credentials on first fallback attempt
-                                if ssh_username is None:
-                                    ssh_username, ssh_password = get_ssh_credentials()
-                                if ssh_username and ssh_password:
-                                    ssh_result = unifi_utils.restart_ap_via_ssh(ap_ip, ssh_username, ssh_password)
-                                    if ssh_result['success']:
-                                        print(f"[OK] via {ssh_result['method']}")
-                                    else:
-                                        print(f"[FAIL] {ssh_result.get('error', 'unknown error')}")
-                                else:
-                                    print("[FAIL] No SSH credentials available")
+
+                    if not ap_mac:
+                        print(f"  {ap_name}... [FAIL] missing MAC address")
+                        continue
+
+                    print(f"  {ap_name}... ", end="", flush=True)
+                    result = unifi_utils.restart_ap(ap_mac)
+                    if result['success']:
+                        print(f"[OK] restart request accepted via {result['method']}")
+                        continue
+
+                    print(f"[FAIL] via controller ({result.get('error', 'unknown error')})")
+                    if ap_ip:
+                        print(f"    Trying SSH fallback to {ap_ip}... ", end="", flush=True)
+                        if ssh_username is None:
+                            ssh_username, ssh_password = get_ssh_credentials()
+                        if ssh_username and ssh_password:
+                            ssh_result = unifi_utils.restart_ap_via_ssh(ap_ip, ssh_username, ssh_password)
+                            if ssh_result['success']:
+                                print(f"[OK] restart request accepted via {ssh_result['method']}")
                             else:
-                                print(f"    No IP address available for SSH fallback")
+                                print(f"[FAIL] {ssh_result.get('error', 'unknown error')}")
+                        else:
+                            print("[FAIL] No SSH credentials available")
+                    else:
+                        print("    No IP address available for SSH fallback")
+
+                if args.verify_offline:
+                    print(f"\n  Verifying all {len(layer_aps)} AP(s) in this layer are offline...")
+                    all_offline = True
+                    verify_targets = [ap for ap in layer_aps if ap.get("mac")]
+                    max_workers = min(len(verify_targets), 8) if verify_targets else 1
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        future_to_ap = {
+                            executor.submit(
+                                ping_ap_offline,
+                                ap.get("mac"),
+                                ap.get("name") or ap.get("model", "Unknown AP"),
+                                ap.get("ip"),
+                                args.offline_timeout,
+                            ): ap
+                            for ap in verify_targets
+                        }
+                        verification_results = {}
+                        for future in as_completed(future_to_ap):
+                            ap = future_to_ap[future]
+                            ap_mac = ap.get("mac", "").lower()
+                            try:
+                                verification_results[ap_mac] = future.result()
+                            except Exception as e:
+                                verification_results[ap_mac] = {
+                                    'success': False,
+                                    'message': f'ping verification error: {e}',
+                                }
+
+                    for ap in layer_aps:
+                        ap_mac = ap.get("mac", "").lower()
+                        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                        ap_ip = ap.get("ip")
+                        result = verification_results.get(ap_mac, {
+                            'success': False,
+                            'message': 'verification did not run',
+                        })
+                        ip_label = f" ({ap_ip})" if ap_ip else ""
+                        status = "OK" if result.get('success') else "FAIL"
+                        print(f"    {ap_name}{ip_label}... [{status}] {result.get('message', 'unknown result')}")
+                        if not result.get('success'):
+                            all_offline = False
+
+                    if all_offline:
+                        if i < len(sorted_depths) - 1:
+                            print("  All APs confirmed offline after restart. Proceeding to next layer...\n")
+                        else:
+                            print("  All APs confirmed offline after restart.\n")
+                    else:
+                        print("  Layer verification failed. Stopping restart_ap.\n")
+                        sys.exit(1)
+                else:
+                    print()
+
+            print("\nAll APs processed for restart_ap.")
             sys.exit(0)
 
         # =====================================================================
@@ -4337,45 +4433,6 @@ LIMITATIONS:
 
                 final_state = unifi_utils.get_ap_state(ap_mac)
                 return False, final_state
-
-            def _is_ap_adoption_complete(ap, require_parent_link=False):
-                if not ap or not unifi_utils.is_ap_fully_adopted(ap):
-                    return False
-
-                ap_ip = ap.get("ip")
-                if not ap_ip:
-                    return False
-
-                def _has_channel_info(device):
-                    radio_tables = []
-                    for key in ("radio_table", "radio_table_stats"):
-                        value = device.get(key)
-                        if isinstance(value, list):
-                            radio_tables.extend(value)
-
-                    for radio in radio_tables:
-                        channel = radio.get("channel")
-                        if channel not in (None, "", "N/A", 0, "0"):
-                            return True
-
-                    return False
-
-                if not _has_channel_info(ap):
-                    return False
-
-                uplink_mac = (
-                    ap.get("uplink_ap_mac")
-                    or ap.get("last_uplink", {}).get("uplink_mac")
-                    or ap.get("uplink", {}).get("uplink_mac")
-                )
-                uplink_type = (
-                    ap.get("uplink", {}).get("type")
-                    or ap.get("last_uplink", {}).get("type")
-                )
-                if require_parent_link and not uplink_mac and uplink_type != "wire":
-                    return False
-
-                return True
 
             def _maybe_set_ap_name_from_dns(ap_mac):
                 """
@@ -5663,67 +5720,75 @@ LIMITATIONS:
                 sys.exit(0)
 
         # =====================================================================
-        # ACTION commands (lock, unlock, reconnect, forget, block, unblock)
-        # For all these actions, fetch and filter clients
+        # Client action commands (lock, unlock, reconnect, block, unblock)
+        # Fetch and filter clients only for actions that actually need them.
         # =====================================================================
-        print("Fetching UniFi clients...")
-        clients = unifi_utils.get_all_unifi_clients()
-        if not clients:
-            print("No clients found.")
-            sys.exit(0)
+        client_filter_actions = {
+            'lock_client',
+            'unlock_client',
+            'reconnect_client',
+            'block_client',
+            'unblock_client',
+        }
+        if args.action in client_filter_actions:
+            print("Fetching UniFi clients...")
+            clients = unifi_utils.get_all_unifi_clients()
+            if not clients:
+                print("No clients found.")
+                sys.exit(0)
 
-        # Add "number" key for numbering (before filtering)
-        for i, client in enumerate(clients):
-            client["number"] = i + 1
+            # Add "number" key for numbering (before filtering)
+            for i, client in enumerate(clients):
+                client["number"] = i + 1
 
-        # Apply filters using hasattr to check for filter arguments
-        filtered_clients = []
-        for client in clients:
-            match = True
-            if hasattr(args, 'filter_online') and args.filter_online and not client.get("is_connected_live", False):
-                match = False
-            elif hasattr(args, 'filter_offline') and args.filter_offline and client.get("is_connected_live", False):
-                match = False
-            if hasattr(args, 'filter_ip') and args.filter_ip:
-                if client.get("display_ip") != args.filter_ip:
+            # Apply filters using hasattr to check for filter arguments
+            filtered_clients = []
+            for client in clients:
+                match = True
+                if hasattr(args, 'filter_online') and args.filter_online and not client.get("is_connected_live", False):
                     match = False
-            if hasattr(args, 'filter_dns_name') and args.filter_dns_name:
-                if client.get("dns_name") != args.filter_dns_name:
+                elif hasattr(args, 'filter_offline') and args.filter_offline and client.get("is_connected_live", False):
                     match = False
-            if hasattr(args, 'filter_hostname') and args.filter_hostname:
-                if client.get("hostname") != args.filter_hostname:
+                if hasattr(args, 'filter_ip') and args.filter_ip:
+                    if client.get("display_ip") != args.filter_ip:
+                        match = False
+                if hasattr(args, 'filter_dns_name') and args.filter_dns_name:
+                    if client.get("dns_name") != args.filter_dns_name:
+                        match = False
+                if hasattr(args, 'filter_hostname') and args.filter_hostname:
+                    if client.get("hostname") != args.filter_hostname:
+                        match = False
+                if hasattr(args, 'filter_by_ssid') and args.filter_by_ssid:
+                    if client.get("live_ssid") != args.filter_by_ssid:
+                        match = False
+                if hasattr(args, 'filter_mac') and args.filter_mac:
+                    client_mac = client.get("mac", "")
+                    if args.filter_mac.lower() not in client_mac.lower():
+                        match = False
+                if hasattr(args, 'filter_signal_above') and args.filter_signal_above is not None:
+                    signal = client.get("live_signal")
+                    if not client.get("is_connected_live", False) or signal is None or signal <= args.filter_signal_above:
+                        match = False
+                if hasattr(args, 'filter_signal_below') and args.filter_signal_below is not None:
+                    signal = client.get("live_signal")
+                    if not client.get("is_connected_live", False) or signal is None or signal >= args.filter_signal_below:
+                        match = False
+                if hasattr(args, 'filter_locked') and args.filter_locked and not client.get("is_ap_locked", False):
                     match = False
-            if hasattr(args, 'filter_by_ssid') and args.filter_by_ssid:
-                if client.get("live_ssid") != args.filter_by_ssid:
+                elif hasattr(args, 'filter_unlocked') and args.filter_unlocked and client.get("is_ap_locked", False):
                     match = False
-            if hasattr(args, 'filter_mac') and args.filter_mac:
-                client_mac = client.get("mac", "")
-                if args.filter_mac.lower() not in client_mac.lower():
-                    match = False
-            if hasattr(args, 'filter_signal_above') and args.filter_signal_above is not None:
-                signal = client.get("live_signal")
-                if not client.get("is_connected_live", False) or signal is None or signal <= args.filter_signal_above:
-                    match = False
-            if hasattr(args, 'filter_signal_below') and args.filter_signal_below is not None:
-                signal = client.get("live_signal")
-                if not client.get("is_connected_live", False) or signal is None or signal >= args.filter_signal_below:
-                    match = False
-            if hasattr(args, 'filter_locked') and args.filter_locked and not client.get("is_ap_locked", False):
-                match = False
-            elif hasattr(args, 'filter_unlocked') and args.filter_unlocked and client.get("is_ap_locked", False):
-                match = False
-            if match:
-                filtered_clients.append(client)
+                if match:
+                    filtered_clients.append(client)
 
-        # Re-number filtered clients
-        for i, client in enumerate(filtered_clients):
-            client["number"] = i + 1
+            # Re-number filtered clients
+            for i, client in enumerate(filtered_clients):
+                client["number"] = i + 1
 
-        if not filtered_clients:
-            print("No clients found matching the specified filters.")
-            sys.exit(0)
+            if not filtered_clients:
+                print("No clients found matching the specified filters.")
+                sys.exit(0)
 
-        print(f"\n{len(filtered_clients)} client(s) matched the filter.")
+            print(f"\n{len(filtered_clients)} client(s) matched the filter.")
 
         # Execute action
         if args.action == 'lock_client':
