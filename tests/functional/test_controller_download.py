@@ -88,8 +88,6 @@ def test_controller_download():
             f'/dl/autobackup/support.tar.gz',
         ]
 
-    output_dir = Path('.')
-
     for i, url in enumerate(download_urls, 1):
         print(f"\n    [{i}/{len(download_urls)}] Trying: {url}")
 

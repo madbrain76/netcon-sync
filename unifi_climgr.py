@@ -1345,26 +1345,35 @@ def display_ap_tree(aps: list, all_devices: list = None, show_macs: bool = True)
     mesh_children_map = defaultdict(list)
     printed_macs = set()
 
-    # Classify APs as wired roots or mesh children
+    # Classify APs as wired roots or mesh children. Some adopted APs are missing
+    # an explicit wired marker even though they are clearly roots; however this
+    # fallback must not apply to pending-adoption APs because they also lack
+    # uplink data before topology is known.
     for ap in aps:
         connection_type = 'N/A'
         is_wired_status = ap.get('wired')
+        uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
+        raw_uplink_type = (
+            ap.get('uplink', {}).get('type')
+            or ap.get('last_uplink', {}).get('type')
+        )
+        is_fully_adopted = unifi_utils.is_ap_fully_adopted(ap)
 
         if is_wired_status is True:
             connection_type = 'wired'
         elif is_wired_status is False:
             connection_type = 'mesh'
         else:
-            raw_uplink_type = ap.get('uplink', {}).get('type')
             if raw_uplink_type == 'wire':
                 connection_type = 'wired'
             elif raw_uplink_type in ['mesh', 'wireless']:
                 connection_type = 'mesh'
+            elif is_fully_adopted and (not uplink_mac or uplink_mac == 'N/A'):
+                connection_type = 'wired'
 
         if connection_type == 'wired':
             wired_roots.append(ap)
         elif connection_type == 'mesh':
-            uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
             if uplink_mac and uplink_mac != 'N/A' and uplink_mac in ap_by_mac:
                 mesh_children_map[uplink_mac].append(ap)
 
@@ -1453,9 +1462,23 @@ def calculate_ap_mesh_depths(aps: list) -> dict:
     # First pass: identify wired roots (depth 0)
     for ap in aps:
         is_wired = ap.get('wired')
-        uplink_type = ap.get('uplink', {}).get('type')
+        uplink_type = (
+            ap.get('uplink', {}).get('type')
+            or ap.get('last_uplink', {}).get('type')
+        )
+        uplink_mac = ap.get('uplink_ap_mac') or ap.get('last_uplink', {}).get('uplink_mac')
+        is_fully_adopted = unifi_utils.is_ap_fully_adopted(ap)
 
-        is_root = is_wired is True or uplink_type == 'wire'
+        is_root = (
+            is_wired is True
+            or uplink_type == 'wire'
+            or (
+                is_fully_adopted
+                and
+                (not uplink_mac or uplink_mac == 'N/A')
+                and uplink_type not in ['mesh', 'wireless']
+            )
+        )
 
         if is_root:
             depths[ap.get('mac')] = 0
@@ -1858,7 +1881,7 @@ def handle_forget_action_batch(clients: list):
     # Construct the single API call with all MACs.
     try:
         payload = {"cmd": "forget-sta", "macs": [mac.lower() for mac in mac_list]}
-        unifi_utils._make_unifi_api_call(
+        unifi_utils.make_unifi_api_call(
             "POST", 
             f"/api/s/{UNIFI_SITE_ID}/cmd/stamgr",
             headers={"Content-Type": "application/json"},
@@ -1913,6 +1936,70 @@ def print_action_results_table(clients_data: list, action_type: str, results: di
 
     print("-" * total_width)
     print()
+
+
+def ping_ap_offline(ap_mac: str, ap_name: str, ap_ip: str, offline_timeout: int = 60) -> dict:
+    """
+    Verify an AP forget by waiting for it to stop responding to ping.
+
+    Success requires 10 consecutive seconds of failed ping replies within the
+    configured timeout window. If that never happens, the forget is treated as
+    failed.
+
+    Args:
+        ap_mac: MAC address of the AP
+        ap_name: Name of the AP
+        ap_ip: IP address of the AP
+        offline_timeout: Maximum number of seconds to wait for the AP to go
+            offline (default: 60 seconds)
+
+    Returns:
+        dict with:
+            success: True if AP becomes non-pingable for 10 consecutive seconds
+            message: Human-readable summary
+    """
+    if not ap_ip:
+        return {'success': False, 'message': 'No IP address available for ping verification'}
+
+    import subprocess
+
+    consecutive_failures = 0
+    start_time = time.monotonic()
+    deadline = start_time + offline_timeout
+
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            break
+
+        remaining = max(0.0, deadline - now)
+        ping_timeout = max(1, min(1, int(remaining)))
+        try:
+            result = subprocess.run(
+                ['ping', '-c', '1', '-W', '1', ap_ip],
+                capture_output=True,
+                timeout=min(2, remaining + 0.25) if remaining > 0 else 1
+            )
+            responded = result.returncode == 0
+        except (subprocess.TimeoutExpired, Exception):
+            responded = False
+
+        if responded:
+            consecutive_failures = 0
+        else:
+            consecutive_failures += 1
+            if consecutive_failures >= 10:
+                elapsed = int(time.monotonic() - start_time)
+                return {'success': True, 'message': f'no ping replies for 10s (by {elapsed}s)'}
+
+        # Poll at roughly 1Hz regardless of how quickly ping returns.
+        sleep_until = min(deadline, now + 1.0)
+        sleep_for = sleep_until - time.monotonic()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+    return {'success': False, 'message': f'still pingable or unstable after {offline_timeout}s'}
+
 
 def _get_multi_level_sort_key(row_data: dict, display_columns: list) -> tuple:
     """
@@ -2667,11 +2754,30 @@ AVAILABLE ACTIONS:
                        --filter_ip, --filter_dns_name, --filter_hostname, --filter_mac,
                        --filter_signal_above, --filter_signal_below
 
-  forget      Forget clients from the controller (removes device entirely)
-              Usage: forget --clients [filters]
-              Filters: --filter_online, --filter_offline, --filter_locked, --filter_unlocked,
-                       --filter_ip, --filter_dns_name, --filter_hostname, --filter_mac,
-                       --filter_signal_above, --filter_signal_below
+  forget      Forget clients or access points from the controller
+              Usage: forget --clients [filters] | forget --aps [filters]
+              Options:
+                --clients              Forget clients (use with --filter_* flags)
+                --aps                  Forget access points (mesh order, with offline verification)
+                --actual_forget        Actually perform the forget (default is dry run)
+                --verify_offline       Verify APs are offline before next layer (default)
+                --no_verify_offline    Skip offline verification
+                --offline_timeout <S>  Wait up to S seconds for 10s of no ping replies (default: 60)
+              CLIENT FILTERS (for --clients):
+                --filter_online, --filter_offline    Online/offline status
+                --filter_locked, --filter_unlocked   Locked/unlocked status
+                --filter_ip <IP>                     Exact IP address match
+                --filter_dns_name <DNS>              Exact DNS name match
+                --filter_hostname <NAME>             Exact hostname match
+                --filter_mac <MAC>                   MAC address substring match
+                --filter_by_ssid <SSID>              Exact SSID match
+                --filter_signal_above <dBm>          Signal strength > value
+                --filter_signal_below <dBm>          Signal strength < value
+              AP FILTERS (for --aps):
+                --filter_online, --filter_offline    Online/offline status
+                --filter_ip <IP>                     IP address substring match
+                --filter_mac <MAC>                   MAC address substring match
+                --filter_name <NAME>                 Name or model substring match
 
   block_client Block clients (prevents connection)
               Usage: block_client [filters]
@@ -2700,16 +2806,6 @@ AVAILABLE ACTIONS:
                 --ap_name <NAME>       Restart AP by name
               If neither --ap_mac nor --ap_name is specified, restarts all APs (use with caution!)
               For mesh networks, APs restart in mesh order (leaf to parent) with 5s delay between layers
-
-  forget_ap   Forget access points from the controller
-              Usage: forget_ap [--ap_mac <MAC> | --ap_name <NAME>] [--actual_forget]
-              Options:
-                --ap_mac <MAC>         Forget AP by MAC address
-                --ap_name <NAME>       Forget AP by name
-                --actual_forget       Actually perform the forget (default is dry run)
-              Removes all APs from the controller in mesh order (leaf to parent)
-              with a 30 second delay between depth layers
-              Default behavior is DRY RUN (shows what would be forgotten without making changes)
 
   adopt_ap    Adopt access points to the controller
               Usage: adopt_ap [--ap_mac <MAC> | --ap_name <NAME>]
@@ -2758,6 +2854,71 @@ AVAILABLE ACTIONS:
               Note: Omit filters to disable ALL SSIDs or APs
               For SSIDs, this sets the enabled=false flag in the WLAN configuration.
 
+  backup      Backup controller data
+              Usage: backup --clients [--backup_location <DIR>] [client filters]
+              Options:
+                --clients                Backup UniFi clients to XML
+                --backup_location <DIR>  Backup directory (default: ~/.netcon-sync/unifi_backups)
+                --filter_online          Only backup online clients
+                --filter_offline         Only backup offline clients
+                --filter_locked          Only backup locked clients
+                --filter_unlocked        Only backup unlocked clients
+                --filter_ip <IP>         Only backup clients with IP containing this string
+                --filter_mac <MAC>       Only backup clients with MAC containing this string
+                --filter_dns_name <DNS>  Only backup clients with DNS name containing this string
+                --filter_hostname <NAME> Only backup clients with hostname containing this string
+              Backups are saved as XML files with timestamp-based names (unifi_clients_YYYYMMDD_HHMMSS.xml)
+              Limitations: client groups and icon metadata are not backed up.
+
+  restore     Restore controller data from backup
+              Usage: restore --clients [--backup_file <FILE>] [--backup_location <DIR>] [--actual_restore]
+              Options:
+                --clients                Restore UniFi clients from XML backup
+                --backup_file <FILE>     Backup file to restore (default: latest in backup location)
+                --backup_location <DIR>  Backup directory (default: ~/.netcon-sync/unifi_backups)
+                --actual_restore         Actually apply changes to UniFi clients (default: dry run)
+              Restores client attributes: hostname, name, note, WiFi speed limits, locked status,
+              locked AP, fixed IP, and local DNS settings. Gateway-specific attributes (e.g.,
+              WiFi speed limits) are gracefully skipped if not supported.
+              Limitations: client groups and icon metadata are not restored.
+
+  check_ap    Check AP status and diagnose upgrade issues
+              Usage: check_ap (--ap_mac <MAC> | --ap_name <NAME>)
+              Options:
+                --ap_mac <MAC>         Check AP by MAC address
+                --ap_name <NAME>       Check AP by name
+
+  save_mesh_topology Export current AP mesh topology to JSON
+              Usage: save_mesh_topology [<FILE>]
+              Options:
+                <FILE>                 JSON output path (default: ~/.netcon-sync/topology.json)
+
+  wait_for_mesh_topology Wait for mesh topology to match a saved topology
+              Usage: wait_for_mesh_topology [<FILE>] [--timeout <MINUTES>]
+              Options:
+                <FILE>                 JSON topology file (default: ~/.netcon-sync/topology.json)
+                --timeout <MINUTES>    Maximum wait time in minutes (default: 75)
+
+  collect_ap_logs Collect diagnostic logs from APs via SSH
+              Usage: collect_ap_logs [--output <DIR>] [--parallel <N>] [--timeout <S>]
+                                     [--no-controller] [--filter-name <NAME>]
+                                     [--filter-ip <IP>] [--filter-mac <MAC>] [--online-only]
+              Options:
+                --output <DIR>         Output directory (default: ~/ap_logs)
+                --parallel <N>         Parallel AP collections (default: 0 = unlimited)
+                --timeout <S>          SSH timeout in seconds (default: 60)
+                --no-controller        Skip controller support file collection
+                --filter-name <NAME>   Filter APs by name (substring match)
+                --filter-ip <IP>       Filter APs by IP (substring match)
+                --filter-mac <MAC>     Filter APs by MAC (substring match)
+                --online-only          Collect only from online APs
+
+  trust       Trust a UniFi certificate or server
+              Usage: trust (--ca <CERT_PATH> | --server <HTTPS_URL>)
+              Options:
+                --ca <CERT_PATH>       Trust a CA/root certificate in the NSS database
+                --server <HTTPS_URL>   Fetch and trust a server certificate
+
 EXAMPLES:
 
   # List all clients
@@ -2799,6 +2960,18 @@ EXAMPLES:
   # Forget clients matching a hostname pattern
   ./unifi_climgr.py forget --clients --filter_hostname "test-device"
 
+  # Dry run: preview forgetting all APs in mesh order
+  ./unifi_climgr.py forget --aps
+
+  # Actually forget all APs in mesh order (with offline verification)
+  ./unifi_climgr.py forget --aps --actual_forget
+
+  # Forget APs without offline verification (for testing)
+  ./unifi_climgr.py forget --aps --actual_forget --no_verify_offline
+
+  # Forget APs with custom offline timeout
+  ./unifi_climgr.py forget --aps --actual_forget --offline_timeout 90
+
   # Unblock a specific client by MAC
   ./unifi_climgr.py unblock_client --filter_mac aa:bb:cc
 
@@ -2813,15 +2986,6 @@ EXAMPLES:
 
   # Restart all APs (WARNING: network disruption! Mesh networks restart in order)
   ./unifi_climgr.py restart_ap
-
-  # Dry run: preview forgetting all APs in mesh order
-  ./unifi_climgr.py forget_ap
-
-  # Dry run: preview forgetting a specific AP by MAC
-  ./unifi_climgr.py forget_ap --ap_mac aa:bb:cc:dd:ee:ff
-
-  # Actually forget all APs in mesh order
-  ./unifi_climgr.py forget_ap --actual_forget
 
   # Adopt all APs (wired first, then mesh as they appear)
   ./unifi_climgr.py adopt_ap
@@ -2852,6 +3016,30 @@ EXAMPLES:
 
   # Enable a specific AP by name
   ./unifi_climgr.py enable --aps "Living Room AP"
+
+  # Backup all clients to default location
+  ./unifi_climgr.py backup --clients
+
+  # Backup only online clients
+  ./unifi_climgr.py backup --clients --filter_online
+
+  # Restore clients from latest backup (dry run)
+  ./unifi_climgr.py restore --clients
+
+  # Restore clients from specific backup file
+  ./unifi_climgr.py restore --clients --backup_file /path/to/unifi_clients_20240101_120000.xml
+
+  # Check a specific AP
+  ./unifi_climgr.py check_ap --ap_mac aa:bb:cc:dd:ee:ff
+
+  # Save current mesh topology
+  ./unifi_climgr.py save_mesh_topology
+
+  # Wait for mesh topology to rebuild from a saved file
+  ./unifi_climgr.py wait_for_mesh_topology ~/.netcon-sync/topology.json --timeout 75
+
+  # Collect AP logs from online APs only
+  ./unifi_climgr.py collect_ap_logs --online-only
 
   # Enable all APs matching a pattern (substring match)
   ./unifi_climgr.py enable --aps --filter_name "bedroom"
@@ -3057,11 +3245,41 @@ EXAMPLES:
     # ============================================================================
     forget_parser = subparsers.add_parser(
         'forget',
-        help='Forget clients from the controller',
+        help='Forget clients or access points from the controller',
         allow_abbrev=False
     )
-    forget_parser.add_argument('--clients', action='store_true', required=True, help='Forget clients')
+    forget_target = forget_parser.add_mutually_exclusive_group(required=True)
+    forget_target.add_argument('--clients', action='store_true', help='Forget clients')
+    forget_target.add_argument('--aps', action='store_true', help='Forget access points')
+    forget_parser.add_argument(
+        '--actual_forget',
+        action='store_true',
+        help='Actually perform the forget (default is dry run)'
+    )
+    forget_parser.add_argument(
+        '--verify_offline',
+        action='store_true',
+        default=True,
+        help='Verify APs are offline before moving to next depth layer (default: enabled)'
+    )
+    forget_parser.add_argument(
+        '--no_verify_offline',
+        action='store_false',
+        dest='verify_offline',
+        help='Skip offline verification (for testing or when ping is unavailable)'
+    )
+    forget_parser.add_argument(
+        '--offline_timeout',
+        type=int,
+        default=60,
+        help='Maximum seconds to wait for AP to stay offline for 10s (default: 60)'
+    )
     add_filter_arguments(forget_parser)
+    forget_parser.add_argument(
+        "--filter_name",
+        type=str,
+        help="Filter APs by name or model (substring match, case-insensitive)."
+    )
 
     # ============================================================================
     # BLOCK_CLIENT action
@@ -3107,23 +3325,7 @@ EXAMPLES:
     restart_ap_target.add_argument('--ap_mac', type=str, help='Restart AP by MAC address')
     restart_ap_target.add_argument('--ap_name', type=str, help='Restart AP by name')
 
-    # ============================================================================
-    # FORGET_AP action
-    # ============================================================================
-    forget_ap_parser = subparsers.add_parser(
-        'forget_ap',
-        help='Forget access points from the controller',
-        allow_abbrev=False
-    )
-    forget_ap_target = forget_ap_parser.add_mutually_exclusive_group(required=False)
-    forget_ap_target.add_argument('--ap_mac', type=str, help='Forget AP by MAC address')
-    forget_ap_target.add_argument('--ap_name', type=str, help='Forget AP by name')
-    forget_ap_parser.add_argument(
-        '--actual_forget',
-        action='store_true',
-        help='Actually perform the forget (default is dry run)'
-    )
-
+ 
     # ============================================================================
     # ADOPT_AP action
     # ============================================================================
@@ -3308,6 +3510,136 @@ EXAMPLES:
         help='Collect only from online APs'
     )
 
+    # BACKUP action
+    # ============================================================================
+    backup_parser = subparsers.add_parser(
+        'backup',
+        help='Backup controller data',
+        allow_abbrev=False,
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+EXAMPLES:
+  # Backup all clients to default location (~/.netcon-sync/unifi_backups)
+  ./unifi_climgr.py backup --clients
+
+  # Backup all clients to custom location
+  ./unifi_climgr.py backup --clients --backup_location /path/to/backups
+
+  # Backup only online clients
+  ./unifi_climgr.py backup --clients --filter_online
+
+  # Backup clients matching a hostname pattern
+  ./unifi_climgr.py backup --clients --filter_hostname "iot-"
+
+LIMITATIONS:
+  Client groups and icon metadata are not included in client backups.
+        """
+    )
+    backup_target = backup_parser.add_mutually_exclusive_group(required=True)
+    backup_target.add_argument(
+        '--clients',
+        action='store_true',
+        help='Backup UniFi clients to XML'
+    )
+    backup_parser.add_argument(
+        '--backup_location', '-l',
+        type=Path,
+        default=None,
+        help='Backup directory (default: ~/.netcon-sync/unifi_backups)'
+    )
+    backup_parser.add_argument(
+        '--filter_online',
+        action='store_true',
+        help='Filter: only backup online clients'
+    )
+    backup_parser.add_argument(
+        '--filter_offline',
+        action='store_true',
+        help='Filter: only backup offline clients'
+    )
+    backup_parser.add_argument(
+        '--filter_locked',
+        action='store_true',
+        help='Filter: only backup locked clients'
+    )
+    backup_parser.add_argument(
+        '--filter_unlocked',
+        action='store_true',
+        help='Filter: only backup unlocked clients'
+    )
+    backup_parser.add_argument(
+        '--filter_ip',
+        type=str,
+        help='Filter: clients with IP containing this string'
+    )
+    backup_parser.add_argument(
+        '--filter_mac',
+        type=str,
+        help='Filter: clients with MAC containing this string'
+    )
+    backup_parser.add_argument(
+        '--filter_dns_name',
+        type=str,
+        help='Filter: clients with DNS name containing this string'
+    )
+    backup_parser.add_argument(
+        '--filter_hostname',
+        type=str,
+        help='Filter: clients with hostname containing this string'
+    )
+
+    # RESTORE action
+    # ============================================================================
+    restore_parser = subparsers.add_parser(
+        'restore',
+        help='Restore controller data from backup',
+        allow_abbrev=False,
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="""
+EXAMPLES:
+  # Restore all clients from latest backup (dry run - preview only)
+  ./unifi_climgr.py restore --clients
+
+  # Restore from specific backup file (dry run - preview only)
+  ./unifi_climgr.py restore --clients --backup_file /path/to/unifi_clients_20240101_120000.xml
+
+  # Perform actual restore
+  ./unifi_climgr.py restore --clients --actual_restore
+
+  # Restore with custom backup location (dry run)
+  ./unifi_climgr.py restore --clients --backup_location /path/to/backups
+
+  # Restore with custom backup location and apply changes
+  ./unifi_climgr.py restore --clients --backup_location /path/to/backups --actual_restore
+
+LIMITATIONS:
+  Client groups and icon metadata are not restored from backup files.
+        """
+    )
+    restore_target = restore_parser.add_mutually_exclusive_group(required=True)
+    restore_target.add_argument(
+        '--clients',
+        action='store_true',
+        help='Restore UniFi clients from XML backup'
+    )
+    restore_parser.add_argument(
+        '--backup_file', '-f',
+        type=Path,
+        default=None,
+        help='Backup file to restore (default: latest in backup location)'
+    )
+    restore_parser.add_argument(
+        '--backup_location', '-l',
+        type=Path,
+        default=None,
+        help='Backup directory (default: ~/.netcon-sync/unifi_backups)'
+    )
+    restore_parser.add_argument(
+        '--actual_restore',
+        action='store_true',
+        help='Actually apply changes to UniFi clients (default: dry run)'
+    )
+
     # Parse arguments
     args = parser.parse_args(argparse_args)
 
@@ -3316,9 +3648,10 @@ EXAMPLES:
         parser.print_help()
         sys.exit(0)
 
-    # Validate that --clients is provided for client-related actions
-    # (but not for lock_client, unlock_client, reconnect_client, enable, disable, add, restart which have different requirements)
-    client_actions_needing_flag = ['forget', 'block', 'unblock']
+    # Validate that client-only actions still receive a client target flag.
+    # `forget` supports both `--clients` and `--aps`, so it is validated by the
+    # mutually exclusive target group on its own parser instead of here.
+    client_actions_needing_flag = ['block', 'unblock']
     if args.action in client_actions_needing_flag:
         if hasattr(args, 'clients') and not args.clients:
             parser.error("--clients is required for this action")
@@ -3689,92 +4022,244 @@ EXAMPLES:
             sys.exit(0)
 
         # =====================================================================
-        # FORGET_AP action
+        # FORGET action (clients or APs)
         # =====================================================================
-        if args.action == 'forget_ap':
-            print("Fetching UniFi devices...")
-            all_devices = unifi_utils.get_devices()
-            aps = [device for device in all_devices if device.get("type") == "uap"]
+        if args.action == 'forget':
+            # Handle forget --clients
+            if args.clients:
+                print("Fetching UniFi clients...")
+                all_clients = unifi_utils.get_all_unifi_clients()
 
-            if not aps:
-                print("No Access Points found.")
+                if not all_clients:
+                    print("No clients found.")
+                    sys.exit(0)
+
+                # Warn about AP-only filters when using --clients
+                ap_only_filters = [
+                    ("--filter_name", "name"),
+                ]
+                for filter_arg, filter_desc in ap_only_filters:
+                    filter_value = getattr(args, filter_arg.strip('--').replace('-', '_'), None)
+                    if filter_value is not None and filter_value is not False:
+                        print(f"  [WARN] {filter_arg} is an AP-only filter and will be ignored for --clients")
+
+                # Apply client-specific filters
+                filtered_clients = all_clients
+                # Status filters
+                if args.filter_online:
+                    filtered_clients = [c for c in filtered_clients if c.get("is_connected_live")]
+                if args.filter_offline:
+                    filtered_clients = [c for c in filtered_clients if not c.get("is_connected_live")]
+                # Locked status filters
+                if args.filter_locked:
+                    filtered_clients = [c for c in filtered_clients if c.get("is_ap_locked")]
+                if args.filter_unlocked:
+                    filtered_clients = [c for c in filtered_clients if not c.get("is_ap_locked")]
+                # IP filter
+                if args.filter_ip:
+                    filtered_clients = [c for c in filtered_clients if args.filter_ip in c.get("display_ip", "")]
+                # DNS name filter
+                if args.filter_dns_name:
+                    filtered_clients = [c for c in filtered_clients if args.filter_dns_name.lower() in c.get("hostname", "").lower()]
+                # Hostname filter
+                if args.filter_hostname:
+                    filtered_clients = [c for c in filtered_clients if args.filter_hostname.lower() in c.get("hostname", "").lower()]
+                # MAC filter (substring match)
+                if args.filter_mac:
+                    filter_mac = args.filter_mac.lower().replace(":", "").replace("-", "")
+                    filtered_clients = [c for c in filtered_clients if filter_mac in c.get("mac", "").lower().replace(":", "").replace("-", "")]
+                # SSID filter
+                if args.filter_by_ssid:
+                    filtered_clients = [c for c in filtered_clients if args.filter_by_ssid in c.get("ssid", "")]
+                # Signal strength filters
+                if args.filter_signal_above:
+                    filtered_clients = [c for c in filtered_clients if c.get("signal", float('-inf')) > args.filter_signal_above]
+                if args.filter_signal_below:
+                    filtered_clients = [c for c in filtered_clients if c.get("signal", float('inf')) < args.filter_signal_below]
+
+                if not filtered_clients:
+                    print("No clients match the specified filters.")
+                    sys.exit(0)
+
+                mode_str = "ACTUAL:" if args.actual_forget else "DRY RUN:"
+                print(f"\n{mode_str} Forgetting {len(filtered_clients)} client(s)...\n")
+
+                if not args.actual_forget:
+                    print("Dry run complete. Re-run with --actual_forget to perform the forget.")
+                    sys.exit(0)
+
+                handle_forget_action_batch(filtered_clients)
                 sys.exit(0)
 
-            if args.ap_mac:
-                target_mac = args.ap_mac.lower()
-                matching_aps = [ap for ap in aps if ap.get("mac", "").lower() == target_mac]
-                if not matching_aps:
-                    print(f"Error: No AP found with MAC {args.ap_mac}")
-                    sys.exit(1)
-                aps_to_forget = matching_aps
-            elif args.ap_name:
-                matching_aps = [ap for ap in aps if (ap.get("name") or ap.get("model", "")).lower() == args.ap_name.lower()]
-                if not matching_aps:
-                    print(f"Error: No AP found with name '{args.ap_name}'")
-                    sys.exit(1)
-                aps_to_forget = matching_aps
-            else:
-                aps_to_forget = aps
+            # Handle forget --aps
+            elif args.aps:
+                print("Fetching UniFi devices...")
+                all_devices = unifi_utils.get_devices()
+                aps = [device for device in all_devices if device.get("type") == "uap"]
 
-            if len(aps_to_forget) > 1:
-                print()
-                display_ap_tree(aps_to_forget, all_devices)
+                if not aps:
+                    print("No Access Points found.")
+                    sys.exit(0)
 
-            # Calculate depths against the full AP inventory so targeted forgets
-            # still retain their real mesh position instead of being mislabeled
-            # as orphans when their parent AP is outside the selected subset.
-            depths = calculate_ap_mesh_depths(aps)
-            aps_by_depth = defaultdict(list)
-            for ap in aps_to_forget:
-                ap_mac = ap.get("mac")
-                depth = depths.get(ap_mac, -1)
-                aps_by_depth[depth].append(ap)
+                # Warn about client-only filters when using --aps
+                client_only_filters = [
+                    ("--filter_locked", "locked"),
+                    ("--filter_unlocked", "unlocked"),
+                    ("--filter_dns_name", "DNS name"),
+                    ("--filter_hostname", "hostname"),
+                    ("--filter_by_ssid", "SSID"),
+                    ("--filter_signal_above", "signal strength (above)"),
+                    ("--filter_signal_below", "signal strength (below)"),
+                ]
+                for filter_arg, filter_desc in client_only_filters:
+                    filter_value = getattr(args, filter_arg.strip('--').replace('-', '_'), None)
+                    if filter_value is not None and filter_value is not False:
+                        print(f"  [WARN] {filter_arg} is a client-only filter and will be ignored for --aps")
 
-            sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
+                # Apply AP-specific filters
+                # Status filters (online/offline)
+                if args.filter_online:
+                    aps = [ap for ap in aps if ap.get("state") == 1]
+                if args.filter_offline:
+                    aps = [ap for ap in aps if ap.get("state") != 1]
 
-            mode_str = "ACTUAL:" if args.actual_forget else "DRY RUN:"
-            print(f"\n{mode_str} Forgetting {len(aps_to_forget)} AP(s) in mesh order (leaf to parent)...\n")
+                # IP filter (substring match)
+                if args.filter_ip:
+                    aps = [ap for ap in aps if args.filter_ip in (ap.get("ip") or "")]
 
-            for i, depth in enumerate(sorted_depths):
-                layer_aps = aps_by_depth[depth]
+                # MAC filter (substring match)
+                if args.filter_mac:
+                    filter_mac = args.filter_mac.lower().replace(":", "").replace("-", "")
+                    aps = [ap for ap in aps if filter_mac in ap.get("mac", "").lower().replace(":", "").replace("-", "")]
 
-                if depth == -1:
-                    depth_label = "Orphan"
-                elif depth == 0:
-                    depth_label = "Wired Root"
-                else:
-                    depth_label = f"Mesh Depth {depth}"
+                # Name filter (substring match in name or model)
+                if args.filter_name:
+                    aps = [ap for ap in aps if args.filter_name.lower() in (ap.get("name") or ap.get("model", "")).lower()]
 
-                print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
-                for ap in layer_aps:
-                    ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                if not aps:
+                    print("No APs match the specified filters.")
+                    sys.exit(0)
+
+                if len(aps) > 1:
+                    print()
+                    display_ap_tree(aps, all_devices)
+
+                # Calculate depths against the full AP inventory so targeted forgets
+                # still retain their real mesh position instead of being mislabeled
+                # as orphans when their parent AP is outside the selected subset.
+                depths = calculate_ap_mesh_depths(aps)
+                aps_by_depth = defaultdict(list)
+                for ap in aps:
                     ap_mac = ap.get("mac")
-                    if not ap_mac:
-                        print(f"  {ap_name}... [FAIL] missing MAC address")
-                        continue
+                    depth = depths.get(ap_mac, -1)
+                    aps_by_depth[depth].append(ap)
 
-                    if not args.actual_forget:
-                        print(f"  {ap_name} ({ap_mac}) [DRY RUN]")
-                        continue
+                sorted_depths = sorted(aps_by_depth.keys(), reverse=True)
 
-                    print(f"  {ap_name}... ", end="", flush=True)
-                    result = unifi_utils.forget_ap(ap_mac)
-                    if result['success']:
-                        print("[OK]")
-                    elif result.get('skipped'):
-                        print(f"[SKIP] {result.get('error', 'skipped')}")
+                mode_str = "ACTUAL:" if args.actual_forget else "DRY RUN:"
+                verify_str = "WITH OFFLINE VERIFICATION" if args.verify_offline else "NO OFFLINE VERIFICATION"
+                print(f"\n{mode_str} Forgetting {len(aps)} AP(s) in mesh order (leaf to parent)...\n")
+                print(f"Offline verification: {verify_str} (wait up to {args.offline_timeout}s for 10s offline)\n")
+
+                for i, depth in enumerate(sorted_depths):
+                    layer_aps = aps_by_depth[depth]
+
+                    if depth == -1:
+                        depth_label = "Orphan"
+                    elif depth == 0:
+                        depth_label = "Wired Root"
                     else:
-                        print(f"[FAIL] {result.get('error', 'unknown error')}")
+                        depth_label = f"Mesh Depth {depth}"
 
-                if args.actual_forget and i < len(sorted_depths) - 1:
-                    print("  Waiting 30 seconds before next layer...\n")
-                    time.sleep(30)
+                    print(f"Layer {i+1}: {depth_label} ({len(layer_aps)} AP{'s' if len(layer_aps) != 1 else ''})")
+                    for ap in layer_aps:
+                        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                        ap_mac = ap.get("mac")
+                        ap_ip = ap.get("ip")
 
-            if args.actual_forget:
-                print("\nAll APs processed for forget_ap.")
-            else:
-                print("\nDry run complete. Re-run with --actual_forget to perform the forget.")
-            sys.exit(0)
+                        if not ap_mac:
+                            print(f"  {ap_name}... [FAIL] missing MAC address")
+                            continue
+
+                        if not args.actual_forget:
+                            print(f"  {ap_name} ({ap_mac}) [DRY RUN]")
+                            continue
+
+                        print(f"  {ap_name}... ", end="", flush=True)
+                        result = unifi_utils.forget_ap(ap_mac)
+                        if result['success']:
+                            print("[OK] forget request accepted")
+                        elif result.get('skipped'):
+                            print(f"[SKIP] {result.get('error', 'skipped')}")
+                        else:
+                            print(f"[FAIL] {result.get('error', 'unknown error')}")
+
+                    # Skip offline verification for orphan APs. Once they drop out of
+                    # controller inventory we may only have their MAC, not a usable IP.
+                    if args.actual_forget and args.verify_offline and depth == -1:
+                        print("\n  Skipping offline verification for orphan APs (no reliable IP to probe).\n")
+                        continue
+
+                    # After processing this layer, verify APs are offline before moving on.
+                    if args.actual_forget and args.verify_offline:
+                        print(f"\n  Verifying all {len(layer_aps)} AP(s) in this layer are offline...")
+                        all_offline = True
+                        verify_targets = [
+                            ap for ap in layer_aps
+                            if ap.get("mac")
+                        ]
+                        max_workers = min(len(verify_targets), 8) if verify_targets else 1
+                        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                            future_to_ap = {
+                                executor.submit(
+                                    ping_ap_offline,
+                                    ap.get("mac"),
+                                    ap.get("name") or ap.get("model", "Unknown AP"),
+                                    ap.get("ip"),
+                                    args.offline_timeout,
+                                ): ap
+                                for ap in verify_targets
+                            }
+                            verification_results = {}
+                            for future in as_completed(future_to_ap):
+                                ap = future_to_ap[future]
+                                ap_mac = ap.get("mac", "").lower()
+                                try:
+                                    verification_results[ap_mac] = future.result()
+                                except Exception as e:
+                                    verification_results[ap_mac] = {
+                                        'success': False,
+                                        'message': f'ping verification error: {e}',
+                                    }
+
+                        for ap in layer_aps:
+                            ap_mac = ap.get("mac", "").lower()
+                            ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                            ap_ip = ap.get("ip")
+                            result = verification_results.get(ap_mac, {
+                                'success': False,
+                                'message': 'verification did not run',
+                            })
+                            ip_label = f" ({ap_ip})" if ap_ip else ""
+                            status = "OK" if result.get('success') else "FAIL"
+                            print(f"    {ap_name}{ip_label}... [{status}] {result.get('message', 'unknown result')}")
+                            if not result.get('success'):
+                                all_offline = False
+
+                        if all_offline:
+                            if i < len(sorted_depths) - 1:
+                                print("  All APs confirmed forgotten. Proceeding to next layer...\n")
+                            else:
+                                print("  All APs confirmed forgotten.\n")
+                        else:
+                            print("  Layer verification failed. Stopping forget --aps.\n")
+                            sys.exit(1)
+
+                if args.actual_forget:
+                    print("\nAll APs processed for forget --aps.")
+                else:
+                    print("\nDry run complete. Re-run with --actual_forget to perform the forget.")
+                sys.exit(0)
 
         # =====================================================================
         # ADOPT_AP action
@@ -3812,12 +4297,13 @@ EXAMPLES:
 
             def _print_adopt_result(ap, result):
                 ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                ap_mac = ap.get("mac", "unknown-mac")
                 if result['success']:
-                    print(f"  {ap_name}... [OK] adoption initiated")
+                    print(f"  {ap_name} ({ap_mac})... [OK] adoption initiated")
                 elif result.get('skipped'):
-                    print(f"  {ap_name}... [SKIP] {result.get('error', 'skipped')}")
+                    print(f"  {ap_name} ({ap_mac})... [SKIP] {result.get('error', 'skipped')}")
                 else:
-                    print(f"  {ap_name}... [FAIL] {result.get('error', 'unknown error')}")
+                    print(f"  {ap_name} ({ap_mac})... [FAIL] {result.get('error', 'unknown error')}")
 
             def _wait_for_ap_adoption(ap_mac, timeout_seconds, require_parent_link=False):
                 deadline = time.time() + timeout_seconds
@@ -3834,7 +4320,7 @@ EXAMPLES:
                             matching_ap = device
                             break
 
-                    if matching_ap and unifi_utils.is_ap_fully_adopted(matching_ap):
+                    if matching_ap and _is_ap_adoption_complete(matching_ap, require_parent_link=require_parent_link):
                         uplink_mac = (
                             matching_ap.get("uplink_ap_mac")
                             or matching_ap.get("last_uplink", {}).get("uplink_mac")
@@ -3844,9 +4330,6 @@ EXAMPLES:
                             matching_ap.get("uplink", {}).get("type")
                             or matching_ap.get("last_uplink", {}).get("type")
                         )
-                        if require_parent_link and not uplink_mac and uplink_type != "wire":
-                            time.sleep(5)
-                            continue
                         readiness = "wired" if uplink_type == "wire" else ("linked" if uplink_mac else "adopted")
                         return True, readiness
 
@@ -3854,6 +4337,45 @@ EXAMPLES:
 
                 final_state = unifi_utils.get_ap_state(ap_mac)
                 return False, final_state
+
+            def _is_ap_adoption_complete(ap, require_parent_link=False):
+                if not ap or not unifi_utils.is_ap_fully_adopted(ap):
+                    return False
+
+                ap_ip = ap.get("ip")
+                if not ap_ip:
+                    return False
+
+                def _has_channel_info(device):
+                    radio_tables = []
+                    for key in ("radio_table", "radio_table_stats"):
+                        value = device.get(key)
+                        if isinstance(value, list):
+                            radio_tables.extend(value)
+
+                    for radio in radio_tables:
+                        channel = radio.get("channel")
+                        if channel not in (None, "", "N/A", 0, "0"):
+                            return True
+
+                    return False
+
+                if not _has_channel_info(ap):
+                    return False
+
+                uplink_mac = (
+                    ap.get("uplink_ap_mac")
+                    or ap.get("last_uplink", {}).get("uplink_mac")
+                    or ap.get("uplink", {}).get("uplink_mac")
+                )
+                uplink_type = (
+                    ap.get("uplink", {}).get("type")
+                    or ap.get("last_uplink", {}).get("type")
+                )
+                if require_parent_link and not uplink_mac and uplink_type != "wire":
+                    return False
+
+                return True
 
             def _maybe_set_ap_name_from_dns(ap_mac):
                 """
@@ -3866,11 +4388,15 @@ EXAMPLES:
                   - A restored UniFi configuration backup
                   - Manual configuration in the UniFi UI
                 """
+                print(f"    Checking reverse DNS for {ap_mac}...", flush=True)
                 rename_result = unifi_utils.set_ap_name_from_reverse_dns(ap_mac)
                 if rename_result.get('success'):
                     print(f"    [OK] AP name set from reverse DNS: {rename_result.get('name')}")
-                elif not rename_result.get('skipped'):
+                elif rename_result.get('skipped'):
+                    print(f"    [SKIP] Reverse DNS naming skipped: {rename_result.get('error', 'skipped')}")
+                else:
                     print(f"    [WARN] Failed to set AP name from reverse DNS: {rename_result.get('error', 'unknown error')}")
+                return rename_result
 
             def _format_adopt_wait_error(result):
                 error = result.get('error', 'not ready yet')
@@ -3880,26 +4406,57 @@ EXAMPLES:
                     return 'not ready for adoption yet'
                 return error
 
+            def _attempt_parallel_adoptions(candidate_aps):
+                results = {}
+                if not candidate_aps:
+                    return results
+
+                max_workers = min(len(candidate_aps), 8)
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_ap = {
+                        executor.submit(unifi_utils.adopt_ap, ap.get("mac")): ap
+                        for ap in candidate_aps
+                        if ap.get("mac")
+                    }
+                    for future in as_completed(future_to_ap):
+                        ap = future_to_ap[future]
+                        ap_mac = ap.get("mac", "").lower()
+                        try:
+                            results[ap_mac] = future.result()
+                        except Exception as e:
+                            results[ap_mac] = {'success': False, 'error': str(e)}
+
+                return results
+
             if use_default_order:
-                fully_adopted_aps = [ap for ap in aps_to_adopt if unifi_utils.is_ap_fully_adopted(ap)]
-                pending_aps = [ap for ap in aps_to_adopt if not unifi_utils.is_ap_fully_adopted(ap)]
-                root_aps = []
-                for ap in pending_aps:
-                    uplink_type = (
-                        ap.get("uplink", {}).get("type")
-                        or ap.get("last_uplink", {}).get("type")
-                    )
-                    if ap.get("wired") is True or uplink_type == "wire":
-                        root_aps.append(ap)
+                adopt_timed_out = False
+                unresolved_macs = []
+                fully_adopted_aps = [ap for ap in aps_to_adopt if _is_ap_adoption_complete(ap)]
+                startup_has_zero_adopted = len(fully_adopted_aps) == 0
+                initial_orphan_batch_attempted = False
                 processed_macs = {
                     ap.get("mac", "").lower()
                     for ap in fully_adopted_aps
                     if ap.get("mac")
                 }
-                retry_after = {}
                 initiated_adoptions = set()
+                in_progress_adoptions = set()
+                named_after_adoption = set()
+                reported_in_progress = set()
+                last_adopt_errors = {}
+                all_seen_macs = {
+                    ap.get("mac", "").lower()
+                    for ap in aps_to_adopt
+                    if ap.get("mac")
+                }
 
-                print(f"\nAdopting all APs: visible wired/root APs first, then newly appearing APs sequentially (timeout: {args.sequence_timeout}s)...\n")
+                if startup_has_zero_adopted:
+                    print(
+                        f"\nAdopting APs with zero startup topology: initial orphan batch in parallel, "
+                        f"then sequential until timeout ({args.sequence_timeout}s)...\n"
+                    )
+                else:
+                    print(f"\nAdopting all APs sequentially until all adopt or timeout ({args.sequence_timeout}s)...\n")
                 if fully_adopted_aps:
                     print(f"Already fully adopted: {len(fully_adopted_aps)} AP(s) will be skipped.\n")
                 all_known_already_adopted = len(fully_adopted_aps) == len(aps_to_adopt)
@@ -3907,148 +4464,120 @@ EXAMPLES:
                     print("All currently known APs are already fully adopted.")
                     print("Waiting for any newly appearing mesh APs. Abort manually if no more APs are expected.\n")
 
-                if root_aps:
-                    print(f"Initial visible AP batch ({len(root_aps)} AP{'s' if len(root_aps) != 1 else ''})")
-                    root_aps_to_confirm = []
-                    for ap in root_aps:
-                        ap_mac = ap.get("mac")
-                        if not ap_mac:
-                            _print_adopt_result(ap, {'success': False, 'error': 'missing MAC address'})
-                            continue
-                        result = unifi_utils.adopt_ap(ap_mac)
-                        _print_adopt_result(ap, result)
-                        if result['success']:
-                            root_aps_to_confirm.append((ap, True))
-                        elif result.get('skipped') and result.get('error') == 'AP is already adopted':
-                            processed_macs.add(ap_mac.lower())
-
-                    for ap, rename_after_confirm in root_aps_to_confirm:
-                        ap_name = ap.get("name") or ap.get("model", "Unknown AP")
-                        ap_mac = ap.get("mac")
-                        if not ap_mac:
-                            continue
-                        print(f"  Waiting for {ap_name} to finish adoption...", flush=True)
-                        adopted_ok, adopted_state = _wait_for_ap_adoption(ap_mac, 180, require_parent_link=False)
-                        if adopted_ok:
-                            print(f"    [OK] {ap_name} reached {adopted_state}")
-                            processed_macs.add(ap_mac.lower())
-                            if rename_after_confirm:
-                                _maybe_set_ap_name_from_dns(ap_mac)
-                        else:
-                            print(f"    [WAIT] {ap_name} did not finish adoption yet (state: {adopted_state})")
-                            retry_after[ap_mac.lower()] = time.time() + 30
-
                 discovery_deadline = time.time() + args.sequence_timeout
                 print("New AP discovery/adoption sequence")
                 while time.time() < discovery_deadline:
                     current_devices = unifi_utils.get_devices()
                     current_aps = [device for device in current_devices if device.get("type") == "uap"]
-                    candidate_aps = []
-                    now = time.time()
-
+                    current_ap_by_mac = {}
                     for ap in current_aps:
                         ap_mac = ap.get("mac", "").lower()
-                        if not ap_mac or ap_mac in processed_macs:
+                        if not ap_mac:
                             continue
-                        if now < retry_after.get(ap_mac, 0):
-                            continue
-                        candidate_aps.append(ap)
+                        current_ap_by_mac[ap_mac] = ap
+                        all_seen_macs.add(ap_mac)
 
-                    candidate_aps.sort(key=lambda ap: (0 if ap.get("ip") else 1, ap.get("mac", "")))
+                    adopted_this_cycle = False
+                    for ap_mac, ap in current_ap_by_mac.items():
+                        if ap_mac in processed_macs:
+                            continue
+                        if _is_ap_adoption_complete(ap):
+                            ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                            ap_ip = ap.get("ip")
+                            if ap_mac in initiated_adoptions or ap_mac in in_progress_adoptions:
+                                if ap_ip:
+                                    print(f"  {ap_name} ({ap_mac}, {ap_ip})... [OK] adoption completed")
+                                else:
+                                    print(f"  {ap_name} ({ap_mac})... [OK] adoption completed")
+                            processed_macs.add(ap_mac)
+                            if (ap_mac in initiated_adoptions or ap_mac in in_progress_adoptions) and ap_mac not in named_after_adoption:
+                                rename_result = _maybe_set_ap_name_from_dns(ap_mac)
+                                skip_reason = rename_result.get('error', '') if rename_result.get('skipped') else ''
+                                if rename_result.get('success') or skip_reason in {
+                                    'AP already has a non-default name',
+                                    'AP name already matches reverse DNS',
+                                }:
+                                    named_after_adoption.add(ap_mac)
+                            adopted_this_cycle = True
+
+                    candidate_aps = [
+                        ap for ap_mac, ap in current_ap_by_mac.items()
+                        if ap_mac not in processed_macs
+                    ]
+                    candidate_aps.sort(key=lambda ap: ap.get("mac", ""))
 
                     if not candidate_aps:
                         remaining = max(0, int(discovery_deadline - time.time()))
                         if remaining == 0:
                             break
-                        known_pending_aps = [
-                            ap for ap in current_aps
-                            if ap.get("mac", "").lower() not in processed_macs
-                        ]
-                        if known_pending_aps:
-                            print(f"  All currently known APs are already adopted or still settling. Waiting 15 seconds... ({remaining}s remaining)")
+                        if current_ap_by_mac:
+                            print(f"  All currently known APs are already adopted or settling. Waiting 15 seconds... ({remaining}s remaining)")
                         else:
                             print(f"  No new APs discovered yet. Waiting 15 seconds... ({remaining}s remaining)")
                         time.sleep(min(15, remaining))
                         continue
 
-                    adopted_this_cycle = False
-                    not_ready_aps = []
-                    selected_ap = None
-                    selected_result = None
-                    for next_ap in candidate_aps:
-                        ap_name = next_ap.get("name") or next_ap.get("model", "Unknown AP")
-                        ap_mac = next_ap.get("mac")
-                        result = unifi_utils.adopt_ap(ap_mac)
-                        if result['success']:
-                            selected_ap = next_ap
-                            selected_result = result
-                            break
-                        if result.get('skipped') and result.get('error') == 'AP is already adopted':
-                            if ap_mac.lower() in initiated_adoptions:
-                                selected_ap = next_ap
-                                selected_result = result
-                                break
-                            if unifi_utils.is_ap_fully_adopted(next_ap):
-                                processed_macs.add(ap_mac.lower())
+                    accepted_this_cycle = False
+                    use_initial_parallel_batch = (
+                        startup_has_zero_adopted
+                        and not initial_orphan_batch_attempted
+                    )
+
+                    if use_initial_parallel_batch:
+                        initial_orphan_batch_attempted = True
+                        print(f"  Initial orphan batch: attempting {len(candidate_aps)} AP(s) in parallel")
+                        adopt_results = _attempt_parallel_adoptions(candidate_aps)
+                        for ap in candidate_aps:
+                            ap_mac = ap.get("mac", "").lower()
+                            ap_name = ap.get("name") or ap.get("model", "Unknown AP")
+                            result = adopt_results.get(ap_mac)
+                            if not result:
                                 continue
-                            wait_reason = "adoption already initiated, waiting for completion"
-                            not_ready_aps.append((ap_name, wait_reason))
-                            retry_after[ap_mac.lower()] = time.time() + 30
-                            continue
 
-                        wait_reason = _format_adopt_wait_error(result)
-                        not_ready_aps.append((ap_name, wait_reason))
-                        retry_after[ap_mac.lower()] = time.time() + 30
-
-                    if not_ready_aps:
-                        print("  Not ready this cycle: " + ", ".join(f"{name} ({reason})" for name, reason in not_ready_aps))
-
-                    if selected_ap is not None and selected_result is not None:
-                        ap_name = selected_ap.get("name") or selected_ap.get("model", "Unknown AP")
-                        ap_mac = selected_ap.get("mac")
-                        print(f"  {ap_name}... ", end="", flush=True)
-                        result = selected_result
-                        if result['success']:
-                            initiated_adoptions.add(ap_mac.lower())
-                            print("[OK] adoption initiated")
-                            print(f"    Waiting for {ap_name} to finish adoption...", flush=True)
-                            adopted_ok, adopted_state = _wait_for_ap_adoption(ap_mac, 300, require_parent_link=True)
-                            if adopted_ok:
-                                print(f"    [OK] {ap_name} reached {adopted_state}")
-                                processed_macs.add(ap_mac.lower())
-                                _maybe_set_ap_name_from_dns(ap_mac)
-                                adopted_this_cycle = True
-                            else:
-                                print(f"    [WAIT] {ap_name} did not finish adoption yet (state: {adopted_state})")
-                                retry_after[ap_mac.lower()] = time.time() + 30
-                        elif result.get('skipped') and result.get('error') == 'AP is already adopted':
-                            if ap_mac.lower() in initiated_adoptions:
-                                print("[OK] adoption completed")
-                                processed_macs.add(ap_mac.lower())
-                                adopted_this_cycle = True
-                            elif unifi_utils.is_ap_fully_adopted(selected_ap):
-                                print(f"[SKIP] {result.get('error')}")
-                                processed_macs.add(ap_mac.lower())
-                            else:
-                                print("[WAIT] adoption already initiated, waiting for completion")
-                                print(f"    Waiting for {ap_name} to finish adoption...", flush=True)
-                                adopted_ok, adopted_state = _wait_for_ap_adoption(ap_mac, 300, require_parent_link=True)
-                                if adopted_ok:
-                                    print(f"    [OK] {ap_name} reached {adopted_state}")
-                                    processed_macs.add(ap_mac.lower())
-                                    initiated_adoptions.add(ap_mac.lower())
-                                    adopted_this_cycle = True
+                            if result.get('success'):
+                                initiated_adoptions.add(ap_mac)
+                                in_progress_adoptions.discard(ap_mac)
+                                last_adopt_errors.pop(ap_mac, None)
+                                print(f"  {ap_name} ({ap_mac})... [OK] adoption initiated")
+                                accepted_this_cycle = True
+                            elif result.get('skipped') and result.get('error') == 'AP is already adopted':
+                                if not _is_ap_adoption_complete(ap):
+                                    in_progress_adoptions.add(ap_mac)
+                                    last_adopt_errors.pop(ap_mac, None)
+                                    if ap_mac not in reported_in_progress:
+                                        print(f"  {ap_name} ({ap_mac})... [WAIT] adoption already in progress")
+                                        reported_in_progress.add(ap_mac)
                                 else:
-                                    print(f"    [WAIT] {ap_name} did not finish adoption yet (state: {adopted_state})")
-                                    retry_after[ap_mac.lower()] = time.time() + 30
+                                    processed_macs.add(ap_mac)
+                            else:
+                                last_adopt_errors[ap_mac] = _format_adopt_wait_error(result)
+                    else:
+                        selected_ap = candidate_aps[0]
+                        ap_mac = selected_ap.get("mac", "").lower()
+                        ap_name = selected_ap.get("name") or selected_ap.get("model", "Unknown AP")
+                        result = unifi_utils.adopt_ap(ap_mac)
+
+                        if result.get('success'):
+                            initiated_adoptions.add(ap_mac)
+                            in_progress_adoptions.discard(ap_mac)
+                            last_adopt_errors.pop(ap_mac, None)
+                            print(f"  {ap_name} ({ap_mac})... [OK] adoption initiated")
+                            accepted_this_cycle = True
+                        elif result.get('skipped') and result.get('error') == 'AP is already adopted':
+                            if not _is_ap_adoption_complete(selected_ap):
+                                in_progress_adoptions.add(ap_mac)
+                                last_adopt_errors.pop(ap_mac, None)
+                                if ap_mac not in reported_in_progress:
+                                    print(f"  {ap_name} ({ap_mac})... [WAIT] adoption already in progress")
+                                    reported_in_progress.add(ap_mac)
+                            else:
+                                processed_macs.add(ap_mac)
                         else:
-                            wait_reason = _format_adopt_wait_error(result)
-                            print(f"[WAIT] {wait_reason}")
-                            retry_after[ap_mac.lower()] = time.time() + 30
+                            last_adopt_errors[ap_mac] = _format_adopt_wait_error(result)
 
                     remaining = max(0, int(discovery_deadline - time.time()))
                     if remaining > 0:
-                        if adopted_this_cycle:
+                        if adopted_this_cycle or accepted_this_cycle:
                             print("  Waiting 15 seconds before checking for the next AP...\n")
                         else:
                             print("  No AP accepted adoption this cycle. Waiting 15 seconds...\n")
@@ -4057,7 +4586,19 @@ EXAMPLES:
                     pass
 
                 if time.time() >= discovery_deadline:
+                    adopt_timed_out = True
                     print(f"\nAdoption sequence timeout reached after {args.sequence_timeout} seconds.")
+                    unresolved_macs = sorted(all_seen_macs - processed_macs)
+                    if unresolved_macs:
+                        print("APs not adopted before timeout:")
+                        for ap_mac in unresolved_macs:
+                            current_ap = next((ap for ap in current_aps if ap.get("mac", "").lower() == ap_mac), None)
+                            ap_name = (
+                                (current_ap.get("name") or current_ap.get("model", "Unknown AP"))
+                                if current_ap else ap_mac
+                            )
+                            reason = last_adopt_errors.get(ap_mac, "controller did not accept adoption before timeout")
+                            print(f"  {ap_name} ({ap_mac})... [FAIL] {reason}")
             else:
                 print(f"\nAdopting {len(aps_to_adopt)} AP(s)...\n")
                 for ap in aps_to_adopt:
@@ -4077,6 +4618,8 @@ EXAMPLES:
                         print(f"[FAIL] {result.get('error', 'unknown error')}")
 
             print("\nAll APs processed for adopt_ap.")
+            if use_default_order and adopt_timed_out and unresolved_macs:
+                sys.exit(1)
             sys.exit(0)
 
         # =====================================================================
@@ -5446,6 +5989,197 @@ EXAMPLES:
                 print(f"WARNING: Failed to create tarball: {e}")
 
             sys.exit(0 if len(failed) == 0 else 1)
+
+        # =====================================================================
+        # BACKUP_CLIENTS action
+        # =====================================================================
+        elif args.action == 'backup':
+            print("unifi_climgr - Client Backup\n")
+
+            # Get all clients
+            print("Fetching UniFi clients...")
+            all_clients = unifi_utils.get_all_unifi_clients()
+
+            if not all_clients:
+                print("No clients found.")
+                sys.exit(0)
+
+            print(f"Found {len(all_clients)} client(s)\n")
+
+            # Apply filters
+            filtered_clients = all_clients
+
+            if args.filter_online:
+                filtered_clients = [c for c in filtered_clients if c.get("is_connected_live")]
+                print(f"Filter: online only ({len(filtered_clients)} clients)\n")
+
+            if args.filter_offline:
+                filtered_clients = [c for c in filtered_clients if not c.get("is_connected_live")]
+                print(f"Filter: offline only ({len(filtered_clients)} clients)\n")
+
+            if args.filter_locked:
+                filtered_clients = [c for c in filtered_clients if c.get("is_ap_locked")]
+                print(f"Filter: locked only ({len(filtered_clients)} clients)\n")
+
+            if args.filter_unlocked:
+                filtered_clients = [c for c in filtered_clients if not c.get("is_ap_locked")]
+                print(f"Filter: unlocked only ({len(filtered_clients)} clients)\n")
+
+            if args.filter_ip:
+                filtered_clients = [c for c in filtered_clients if args.filter_ip in c.get("display_ip", "")]
+                print(f"Filter: IP contains '{args.filter_ip}' ({len(filtered_clients)} clients)\n")
+
+            if args.filter_mac:
+                filter_mac_clean = args.filter_mac.replace(':', '').replace('-', '').lower()
+                filtered_clients = [c for c in filtered_clients if filter_mac_clean in c.get("mac", "").replace(':', '').lower()]
+                print(f"Filter: MAC contains '{args.filter_mac}' ({len(filtered_clients)} clients)\n")
+
+            if args.filter_dns_name:
+                filtered_clients = [c for c in filtered_clients if args.filter_dns_name.lower() in c.get("dns_name", "").lower()]
+                print(f"Filter: DNS name contains '{args.filter_dns_name}' ({len(filtered_clients)} clients)\n")
+
+            if args.filter_hostname:
+                filtered_clients = [c for c in filtered_clients if args.filter_hostname.lower() in c.get("hostname", "").lower()]
+                print(f"Filter: hostname contains '{args.filter_hostname}' ({len(filtered_clients)} clients)\n")
+
+            if not filtered_clients:
+                print("No clients match the specified filters.")
+                sys.exit(0)
+
+            # Export clients to XML
+            print(f"Exporting {len(filtered_clients)} client(s) to XML...")
+            backup_dir = args.backup_location if args.backup_location else None
+
+            # Convert filtered clients to export format
+            clients_to_export = []
+            for client in filtered_clients:
+                mac = client.get("mac")
+                if mac:
+                    export_data = unifi_utils.export_client_data(mac)
+                    if export_data:
+                        clients_to_export.append(export_data)
+
+            if not clients_to_export:
+                print("No clients could be exported.")
+                sys.exit(0)
+
+            try:
+                filepath = unifi_utils.export_clients_to_file(clients_to_export, backup_dir)
+                print(f"[OK] Backup saved to: {filepath}")
+            except Exception as e:
+                print(f"[FAIL] Failed to create backup: {e}")
+                sys.exit(1)
+
+            sys.exit(0)
+
+        # =====================================================================
+        # RESTORE_CLIENTS action
+        # =====================================================================
+        elif args.action == 'restore':
+            print("unifi_climgr - Client Restore\n")
+
+            # Determine backup location
+            backup_dir = args.backup_location if args.backup_location else Path.home() / ".netcon-sync" / "unifi_backups"
+
+            # Determine backup file
+            backup_file = args.backup_file
+            if not backup_file:
+                # Find latest backup file
+                if not backup_dir.exists():
+                    print(f"ERROR: Backup directory does not exist: {backup_dir}")
+                    sys.exit(1)
+
+                backup_files = list(backup_dir.glob("unifi_clients_*.xml"))
+                if not backup_files:
+                    print(f"ERROR: No backup files found in: {backup_dir}")
+                    sys.exit(1)
+
+                backup_file = max(backup_files, key=lambda f: f.stat().st_mtime)
+                print(f"Using latest backup: {backup_file}\n")
+            else:
+                if not backup_file.exists():
+                    print(f"ERROR: Backup file does not exist: {backup_file}")
+                    sys.exit(1)
+                print(f"Using backup file: {backup_file}\n")
+
+            # Read backup file
+            print("Reading backup file...")
+            try:
+                with open(backup_file, 'r') as f:
+                    xml_content = f.read()
+                clients = unifi_utils._xml_to_clients(xml_content)
+                print(f"[OK] Loaded {len(clients)} client(s) from backup\n")
+            except Exception as e:
+                print(f"[FAIL] Failed to read backup file: {e}")
+                sys.exit(1)
+
+            # Safety check: require --actual_restore to make changes
+            if not args.actual_restore:
+                print("[INFO] Running in dry-run mode (default). Use --actual_restore to apply changes.\n")
+
+            # Restore clients
+            mode = "APPLYING CHANGES" if args.actual_restore else "DRY RUN (no changes applied)"
+            print(f"Mode: {mode}")
+            print(f"Processing {len(clients)} client(s)...\n")
+
+            results = {
+                "success": 0,
+                "failed": 0,
+                "skipped": 0
+            }
+
+            for client_data in clients:
+                mac = client_data.get("mac")
+                if not mac:
+                    continue
+
+                result = unifi_utils.restore_client_data(client_data, dry_run=not args.actual_restore)
+
+                if result["success"]:
+                    if result["applied"]:
+                        # Build detailed output with field values
+                        output_lines = []
+                        for field in result['applied']:
+                            if field in result.get("details", {}):
+                                value = result["details"][field]
+                                output_lines.append(f"{field}: {value}")
+                            else:
+                                output_lines.append(field)
+                        applied_str = ', '.join(output_lines)
+                        # Add locked AP MAC info if applicable
+                        if result.get("locked_ap_mac"):
+                            applied_str += f" (locked to AP: {result['locked_ap_mac']})"
+                        # Add previous AP name if client was previously locked
+                        if result.get("previous_ap_name"):
+                            applied_str += f" (previous AP name: {result['previous_ap_name']})"
+                        # Indicate if this is a new client creation or update
+                        if result.get("client_type") == "new":
+                            print(f"  [{mac}] Created new client: {applied_str}")
+                        else:
+                            print(f"  [{mac}] Updated existing client: {applied_str}")
+                    if result["skipped"]:
+                        for skip in result["skipped"]:
+                            print(f"  [{mac}] Skipped {skip['attribute']}: {skip['reason']}")
+                    results["success"] += 1
+                else:
+                    if result["failed"]:
+                        for fail in result["failed"]:
+                            print(f"  [{mac}] Failed: {fail.get('attribute', 'unknown')} - {fail.get('error', fail.get('reason', 'unknown'))}")
+                    results["failed"] += 1
+
+            # Print summary
+            print(f"\n{'='*60}")
+            print("RESTORE SUMMARY")
+            print(f"{'='*60}")
+            print(f"Total clients processed: {len(clients)}")
+            print(f"  [OK] Success: {results['success']}")
+            print(f"  [FAIL] Failed: {results['failed']}")
+
+            if not args.actual_restore:
+                print("\n[INFO] Dry run only. No changes were applied.")
+                print("[INFO] Re-run with --actual_restore to apply the restored client names, notes, and other settings.")
+
+            sys.exit(0 if results["failed"] == 0 else 1)
 
     except nss.error.NSPRError as e:
         # Certificate validation error - provide helpful guidance

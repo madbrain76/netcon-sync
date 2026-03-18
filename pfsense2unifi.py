@@ -88,14 +88,20 @@ except ValueError as e:
     # Store config error from pfsense_utils import chain
     _unifi_import_error = e
 
-def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> dict:
+def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False,
+                            connected_macs: set = None) -> dict:
     """
     Detects clients in UniFi that were not updated by the sync process.
     Optionally deletes them if delete_orphans flag is set.
 
+    Connected clients are excluded from orphan detection - they are legitimate
+    clients that are currently active on the network.
+
     Args:
         synced_macs (set): Set of MAC addresses that were synced from pfSense
         delete_orphans (bool): If True, delete orphaned clients; if False, just report them
+        connected_macs (set, optional): Set of MAC addresses that are currently connected.
+            These will be excluded from orphan detection.
 
     Returns:
         dict: Results of orphan detection/deletion
@@ -104,6 +110,7 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
 
     orphan_results = {
         "found": [],
+        "skipped_connected": [],
         "deleted": [],
         "failed_to_delete": []
     }
@@ -111,13 +118,25 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
     print("\nChecking for orphaned clients in UniFi...")
     unifi_clients_by_mac = get_unifi_clients_fast()
 
-    # Normalize synced MACs to lowercase for comparison
+    # Normalize MACs to lowercase for comparison
     synced_macs_lower = {mac.lower() for mac in synced_macs}
+    connected_macs_lower = {mac.lower() for mac in (connected_macs or set())}
 
     # Find clients in UniFi that aren't in our synced list
     for mac, client in unifi_clients_by_mac.items():
         if mac not in synced_macs_lower:
             client_name = client.get("name") or client.get("hostname") or mac
+
+            # Skip connected clients - they are legitimate active clients
+            if mac in connected_macs_lower:
+                orphan_results["skipped_connected"].append({
+                    "mac": mac,
+                    "name": client_name,
+                    "hostname": client.get("hostname"),
+                    "note": client.get("note")
+                })
+                continue
+
             orphan_results["found"].append({
                 "mac": mac,
                 "name": client_name,
@@ -125,11 +144,21 @@ def handle_orphaned_clients(synced_macs: set, delete_orphans: bool = False) -> d
                 "note": client.get("note")
             })
 
-    if not orphan_results["found"]:
+    if not orphan_results["found"] and not orphan_results["skipped_connected"]:
         print("No orphaned clients found.")
         return orphan_results
 
-    print(f"Found {len(orphan_results['found'])} orphaned clients in UniFi:")
+    # Report skipped connected clients
+    if orphan_results["skipped_connected"]:
+        print(f"Skipped {len(orphan_results['skipped_connected'])} connected client(s) (not deleting):")
+        for client in orphan_results["skipped_connected"]:
+            print(f"  - {client['mac']}: {client['name']}")
+
+    if not orphan_results["found"]:
+        print("No orphaned clients to delete (all were connected).")
+        return orphan_results
+
+    print(f"\nFound {len(orphan_results['found'])} orphaned client(s) to delete:")
     for client in orphan_results["found"]:
         print(f"  - {client['mac']}: {client['name']}")
 
@@ -193,6 +222,8 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
 
     # Track synced MACs for orphan detection
     synced_macs = set()
+    # Track connected MACs - these should NOT be treated as orphans
+    connected_macs = set()
 
     try:
         # STEP 1: Fetch DHCP static mappings from pfSense FIRST
@@ -219,6 +250,14 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
         print("\nPre-fetching all UniFi clients...")
         unifi_clients_by_mac = get_unifi_clients_fast()
         print(f"Found {len(unifi_clients_by_mac)} existing clients in UniFi.")
+
+        # Collect connected clients first - these should NOT be treated as orphans
+        connected_macs = {
+            mac for mac, client in unifi_clients_by_mac.items()
+            if client.get("is_connected_live", False)
+        }
+        if connected_macs:
+            print(f"Found {len(connected_macs)} connected client(s) - these will be excluded from orphan detection")
 
         # STEP 4: Process pfSense mappings and send API calls directly
         print(f"\nProcessing {len(pfsense_mappings)} pfSense DHCP mappings...")
@@ -429,8 +468,9 @@ def sync_pfsense_dhcp_to_unifi(delete_orphans: bool = False, suffix: str = None)
                 print(f"  - {client['mac']}: {client['hostname']}")
 
         # Handle orphaned clients
+        # Connected clients are excluded from orphan detection - they are legitimate active clients
         if synced_macs:
-            orphan_results = handle_orphaned_clients(synced_macs, delete_orphans)
+            orphan_results = handle_orphaned_clients(synced_macs, delete_orphans, connected_macs)
             if orphan_results["failed_to_delete"]:
                 print("\nWARNING: Failed to delete some orphaned clients")
                 sys.exit(1)

@@ -14,7 +14,9 @@ import socket
 import json
 import re
 import sys
+import time
 import nss.error
+import xml.etree.ElementTree as ET
 from config import UNIFI_NETWORK_URL, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_SITE_ID, DEFAULT_DOMAIN
 from http_tls_nss import NSPRNSSURLOpener
 
@@ -50,6 +52,69 @@ def _normalize_dns_hostname(dns_name: str) -> str:
     if DEFAULT_DOMAIN and normalized.endswith("." + DEFAULT_DOMAIN):
         normalized = normalized[: -(len(DEFAULT_DOMAIN) + 1)]
     return normalized
+
+
+def _normalize_ap_default_name(name: str) -> str:
+    """Normalize AP model/default labels for loose equality checks."""
+    if not name:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def _looks_like_unifi_default_ap_name(name: str, device: dict | None = None) -> bool:
+    """
+    Return True when the current AP name looks like a stock UniFi label rather
+    than a user-assigned/custom location name.
+    """
+    if not name:
+        return True
+
+    normalized = _normalize_ap_default_name(name)
+    if not normalized:
+        return True
+
+    # First trust direct equivalence to model-ish identifiers when available.
+    if device:
+        for key in (
+            "model",
+            "model_name",
+            "product",
+            "product_name",
+            "market_name",
+            "type_name",
+            "shortname",
+            "sku",
+        ):
+            value = device.get(key)
+            if not value:
+                continue
+            value_normalized = _normalize_ap_default_name(str(value))
+            if normalized == value_normalized:
+                return True
+            if normalized == re.sub(r"^uap", "", value_normalized):
+                return True
+
+    raw = str(name).strip()
+    if not re.fullmatch(r"[A-Z0-9][A-Z0-9 _-]{0,31}", raw):
+        return False
+
+    tokens = [token for token in re.split(r"[ _-]+", raw) if token]
+    if not tokens:
+        return False
+
+    generic_tokens = {
+        "UAP", "AP", "AC", "AX", "BE", "LR", "PRO", "MAX", "HD", "SHD",
+        "IW", "MESH", "LITE", "PLUS", "ENTERPRISE", "NANOHD", "FLEXHD",
+        "BEACON", "OUTDOOR", "INWALL", "XG",
+    }
+
+    has_model_family_token = any(
+        re.fullmatch(r"U\d+[A-Z0-9]*", token) or token in generic_tokens
+        for token in tokens
+    )
+    has_lowercase = any(ch.islower() for ch in raw)
+
+    return has_model_family_token and not has_lowercase
 
 
 def is_ap_fully_adopted(device: dict) -> bool:
@@ -335,11 +400,30 @@ def _derive_ieee_version_from_proto(proto) -> str:
 def get_unifi_clients_fast() -> dict:
     """
     Fast lightweight fetch of UniFi clients WITHOUT DNS lookups.
-    Returns a simple dict mapping MAC -> raw client data.
+    Returns a simple dict mapping MAC -> raw client data with is_connected_live field.
     For batch operations that don't need display formatting.
     """
+    # Fetch all known clients
     all_known_clients = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
-    return {client.get("mac", "").lower(): client for client in all_known_clients if "mac" in client}
+
+    # Fetch live connected clients to determine is_connected_live status
+    live_clients_data = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/stat/sta")
+
+    # Create a map from client MAC (lowercase) to live client data
+    live_clients_map = {client["mac"].lower(): client for client in live_clients_data if "mac" in client}
+
+    # Build result dict with is_connected_live field
+    result = {}
+    for client in all_known_clients:
+        mac = client.get("mac")
+        if not mac:
+            continue
+        normalized_mac = mac.lower()
+        client_data = client.copy()
+        client_data["is_connected_live"] = normalized_mac in live_clients_map
+        result[normalized_mac] = client_data
+
+    return result
 
 
 def get_all_unifi_clients() -> list:
@@ -1052,7 +1136,10 @@ def adopt_ap(ap_mac: str) -> dict:
         if not matching_ap:
             return {'success': False, 'error': f'AP not found: {ap_mac}'}
 
-        if is_ap_fully_adopted(matching_ap):
+        # Be conservative here. The controller can transiently report adopted-ish
+        # fields while the UI still shows a clickable Adopt button. Only suppress
+        # a fresh adopt request once the AP is clearly complete and has an IP.
+        if is_ap_fully_adopted(matching_ap) and matching_ap.get("ip"):
             return {
                 'success': False,
                 'skipped': True,
@@ -1114,11 +1201,23 @@ def set_ap_name_from_reverse_dns(ap_mac: str) -> dict:
             return {'success': False, 'skipped': True, 'error': 'Reverse DNS hostname was empty'}
 
         current_name = matching_ap.get("name") or matching_ap.get("model", "")
-        default_name = matching_ap.get("model", "")
-        if current_name and current_name != default_name:
-            return {'success': False, 'skipped': True, 'error': 'AP already has a non-default name'}
-        if current_name == desired_name:
-            return {'success': False, 'skipped': True, 'error': 'AP name already matches reverse DNS'}
+        current_name_normalized = _normalize_ap_default_name(current_name)
+        desired_name_normalized = _normalize_ap_default_name(desired_name)
+        if current_name_normalized and current_name_normalized == desired_name_normalized:
+            return {
+                'success': False,
+                'skipped': True,
+                'error': f"current name '{current_name}' already matches reverse DNS '{desired_name}'",
+            }
+
+        if current_name and not _looks_like_unifi_default_ap_name(current_name, matching_ap):
+            return {
+                'success': False,
+                'skipped': True,
+                'error': (
+                    f"keeping custom name '{current_name}' instead of reverse DNS '{desired_name}'"
+                ),
+            }
 
         device_id = matching_ap.get("_id")
         if not device_id:
@@ -2234,3 +2333,709 @@ def is_ap_actively_upgrading(ap_mac: str) -> bool:
         return False
     except Exception:
         return False
+
+
+def _extract_wifi_speed_limit(client_data: dict) -> dict:
+    """
+    Extract WiFi speed limit settings from client data.
+    These fields may not exist on non-gateway controllers.
+
+    Args:
+        client_data: Raw client data from UniFi API
+
+    Returns:
+        dict: Speed limit settings (may be empty if not applicable)
+    """
+    speed_limits = {}
+
+    # Check for various speed limit field names across UniFi versions
+    tx_rate = client_data.get("tx_rate")
+    rx_rate = client_data.get("rx_rate")
+    max_tx_rate = client_data.get("max_tx_rate")
+    max_rx_rate = client_data.get("max_rx_rate")
+
+    if tx_rate is not None:
+        speed_limits["tx_rate"] = tx_rate
+    if rx_rate is not None:
+        speed_limits["rx_rate"] = rx_rate
+    if max_tx_rate is not None:
+        speed_limits["max_tx_rate"] = max_tx_rate
+    if max_rx_rate is not None:
+        speed_limits["max_rx_rate"] = max_rx_rate
+
+    return speed_limits
+
+
+def _client_to_xml(client_data: dict) -> str:
+    """
+    Convert a single client's export data to XML format.
+
+    Args:
+        client_data: Client data dictionary
+
+    Returns:
+        str: XML string for this client
+    """
+    import xml.etree.ElementTree as ET
+
+    client = ET.Element("client")
+
+   # Basic fields
+    ET.SubElement(client, "mac").text = client_data.get("mac", "")
+    ET.SubElement(client, "hostname").text = client_data.get("hostname", "")
+    ET.SubElement(client, "name").text = client_data.get("name", "")
+    ET.SubElement(client, "note").text = client_data.get("note", "")
+
+    # Previous AP name (for locked clients - historical info only)
+    previous_ap_name = client_data.get("previous_ap_name", "")
+    if previous_ap_name:
+        ET.SubElement(client, "previous_ap_name").text = previous_ap_name
+
+    # Speed limits (gateway-specific)
+    speed_limits = client_data.get("speed_limits", {})
+    speed_elem = ET.SubElement(client, "speed_limits")
+    for key, value in speed_limits.items():
+        sub = ET.SubElement(speed_elem, key)
+        sub.text = str(value)
+
+    # Locked settings - only save ap_mac and ap_name if locked is enabled
+    locked = client_data.get("locked", {})
+    locked_elem = ET.SubElement(client, "locked")
+    locked_elem.set("enabled", str(locked.get("enabled", False)).lower())
+    if locked.get("enabled", False):
+        ap_mac = locked.get("ap_mac", "")
+        if ap_mac:
+            ET.SubElement(locked_elem, "ap_mac").text = ap_mac
+        ap_name = locked.get("ap_name", "")
+        if ap_name:
+            ET.SubElement(locked_elem, "ap_name").text = ap_name
+
+    # IP settings
+    ip_settings = client_data.get("ip_settings", {})
+    ip_elem = ET.SubElement(client, "ip_settings")
+    ip_elem.set("use_fixed_ip", str(ip_settings.get("use_fixed_ip", False)).lower())
+    ET.SubElement(ip_elem, "fixed_ip").text = ip_settings.get("fixed_ip", "")
+    ip_elem.set("local_dns_enabled", str(ip_settings.get("local_dns_enabled", False)).lower())
+    ET.SubElement(ip_elem, "local_dns_record").text = ip_settings.get("local_dns_record", "")
+
+    return ET.tostring(client, encoding="unicode", xml_declaration=False)
+
+
+def _clients_to_xml(clients: list) -> str:
+    """
+    Convert a list of clients to XML format.
+
+    Args:
+        clients: List of client data dictionaries
+
+    Returns:
+        str: Complete XML string
+    """
+    import xml.etree.ElementTree as ET
+
+    root = ET.Element("unifi_clients")
+    root.set("version", "1.0")
+
+    for client_data in clients:
+        client_xml = _client_to_xml(client_data)
+        client_elem = ET.fromstring(client_xml)
+        root.append(client_elem)
+
+    # Format XML with proper indentation for readability
+    xml_str = ET.tostring(root, encoding="unicode", xml_declaration=True)
+    # Parse again to add indentation
+    root2 = ET.fromstring(xml_str)
+    _indent(root2)
+    return ET.tostring(root2, encoding="unicode", xml_declaration=True)
+
+
+def _indent(elem, level=0):
+    """Recursively add indentation to XML elements for readability."""
+    i = "\n" + level * "  "
+    if len(elem):
+        if not elem.text or not elem.text.strip():
+            elem.text = i + "  "
+        if not elem.tail or not elem.tail.strip():
+            elem.tail = i
+        for child in elem:
+            _indent(child, level + 1)
+        if not child.tail or not child.tail.strip():
+            child.tail = i
+    else:
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = i
+
+
+def _xml_to_client(client_elem: ET.Element) -> dict:
+    """
+    Convert an XML client element to a dictionary.
+
+    Args:
+        client_elem: XML Element for a single client
+
+    Returns:
+        dict: Client data dictionary
+    """
+    import xml.etree.ElementTree as ET
+
+    def get_text(elem, tag, default=""):
+        child = elem.find(tag)
+        return child.text if child is not None and child.text is not None else default
+
+    def get_bool(elem, tag, default=False):
+        val = get_text(elem, tag, str(default).lower())
+        return val.lower() in ("true", "1", "yes")
+
+    # Get locked status - enabled is an attribute of the locked element
+    locked_elem = client_elem.find("locked")
+    locked_enabled = locked_elem.get("enabled", "false").lower() in ("true", "1", "yes") if locked_elem is not None else False
+    locked_ap_mac = get_text(locked_elem, "ap_mac") if locked_elem is not None else ""
+    locked_ap_name = get_text(locked_elem, "ap_name") if locked_elem is not None else ""
+
+    # Get ip_settings status - use_fixed_ip and local_dns_enabled are attributes
+    ip_settings_elem = client_elem.find("ip_settings")
+    ip_use_fixed_ip = ip_settings_elem.get("use_fixed_ip", "false").lower() in ("true", "1", "yes") if ip_settings_elem is not None else False
+    ip_local_dns_enabled = ip_settings_elem.get("local_dns_enabled", "false").lower() in ("true", "1", "yes") if ip_settings_elem is not None else False
+    ip_fixed_ip = get_text(ip_settings_elem, "fixed_ip") if ip_settings_elem is not None else ""
+    ip_local_dns_record = get_text(ip_settings_elem, "local_dns_record") if ip_settings_elem is not None else ""
+
+    client = {
+        "mac": get_text(client_elem, "mac"),
+        "hostname": get_text(client_elem, "hostname"),
+        "name": get_text(client_elem, "name"),
+        "note": get_text(client_elem, "note"),
+        "speed_limits": {},
+        "locked": {
+            "enabled": locked_enabled,
+            "ap_mac": locked_ap_mac,
+            "ap_name": locked_ap_name
+        },
+        "ip_settings": {
+            "use_fixed_ip": ip_use_fixed_ip,
+            "fixed_ip": ip_fixed_ip,
+            "local_dns_enabled": ip_local_dns_enabled,
+            "local_dns_record": ip_local_dns_record
+        },
+        "previous_ap_name": get_text(client_elem, "previous_ap_name")
+    }
+
+    # Parse speed limits
+    speed_elem = client_elem.find("speed_limits")
+    if speed_elem is not None:
+        for child in speed_elem:
+            try:
+                client["speed_limits"][child.tag] = int(child.text) if child.text else 0
+            except (ValueError, TypeError):
+                client["speed_limits"][child.tag] = child.text
+
+    return client
+
+
+def _xml_to_clients(xml_content: str) -> list:
+    """
+    Parse XML content and return list of client dictionaries.
+
+    Args:
+        xml_content: XML string
+
+    Returns:
+        list: List of client data dictionaries
+    """
+    root = ET.fromstring(xml_content)
+    clients = []
+
+    for client_elem in root.findall("client"):
+        clients.append(_xml_to_client(client_elem))
+
+    return clients
+
+
+def _get_ap_name_by_mac(ap_mac: str) -> str:
+    """
+    Get the name of an AP by its MAC address.
+
+    Args:
+        ap_mac: The MAC address of the AP
+
+    Returns:
+        str: The AP name, or empty string if not found
+    """
+    aps = get_devices()
+    for ap in aps:
+        if ap.get("mac", "").lower() == ap_mac.lower():
+            return ap.get("name", "") or ""
+    return ""
+
+
+def export_client_data(client_mac: str) -> dict | None:
+    """
+    Export a single client's data from UniFi controller.
+
+    Args:
+        client_mac (str): The MAC address of the client to export
+
+    Returns:
+        dict: Client data dictionary, or None if client not found
+    """
+    client_data = _get_single_client_data_by_mac(client_mac)
+    if not client_data:
+        return None
+
+    # Extract all configurable fields
+    speed_limits = _extract_wifi_speed_limit(client_data)
+    locked_enabled = client_data.get("fixed_ap_enabled", False)
+    locked_ap_mac = client_data.get("fixed_ap_mac") or ""
+    use_fixed_ip = client_data.get("use_fixedip", False)
+    fixed_ip = client_data.get("fixed_ip") or ""
+    local_dns_enabled = client_data.get("local_dns_record_enabled", False)
+    local_dns_record = client_data.get("local_dns_record") or ""
+
+    # Only include ap_mac and ap_name if client is locked to an AP
+    ap_mac_value = locked_ap_mac if locked_enabled else ""
+    ap_name_value = _get_ap_name_by_mac(locked_ap_mac) if locked_enabled else ""
+
+    export_data = {
+        "mac": client_mac.lower(),
+        "hostname": client_data.get("hostname") or "",
+        "name": client_data.get("name") or "",
+        "note": client_data.get("note") or "",
+        "speed_limits": speed_limits,
+        "locked": {
+            "enabled": locked_enabled,
+            "ap_mac": ap_mac_value,
+            "ap_name": ap_name_value
+        },
+        "ip_settings": {
+            "use_fixed_ip": use_fixed_ip,
+            "fixed_ip": fixed_ip,
+            "local_dns_enabled": local_dns_enabled,
+            "local_dns_record": local_dns_record
+        }
+    }
+
+    # Add previous AP name for locked clients (for restore reporting)
+    if locked_enabled and locked_ap_mac:
+        export_data["previous_ap_name"] = ap_name_value
+
+    return export_data
+
+
+def export_clients_to_file(clients: list, backup_dir: str = None) -> str:
+    """
+    Export all clients to an XML backup file.
+
+    Args:
+        clients: List of client data dictionaries
+        backup_dir: Directory to store backup file (default: ~/.netcon-sync/unifi_backups)
+
+    Returns:
+        str: Path to the created backup file
+    """
+    import os
+    import datetime
+    from pathlib import Path
+
+    # Default backup directory
+    if backup_dir is None:
+        backup_dir = str(Path.home() / ".netcon-sync" / "unifi_backups")
+
+    # Create backup directory if it doesn't exist
+    os.makedirs(backup_dir, exist_ok=True)
+
+    # Generate filename with timestamp
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"unifi_clients_{timestamp}.xml"
+    filepath = os.path.join(backup_dir, filename)
+
+    # Export clients
+    xml_content = _clients_to_xml(clients)
+
+    # Write to file
+    with open(filepath, "w") as f:
+        f.write(xml_content)
+
+    return filepath
+
+
+def export_all_clients() -> list:
+    """
+    Export all UniFi clients in version-agnostic format.
+
+    Returns:
+        list: List of client data dictionaries (ready for XML export)
+    """
+    import datetime
+
+    clients = []
+    all_known_clients = make_unifi_api_call("GET", f"/api/s/{UNIFI_SITE_ID}/rest/user")
+
+    for client in all_known_clients:
+        mac = client.get("mac")
+        if not mac:
+            continue
+
+        client_data = _get_single_client_data_by_mac(mac)
+        if not client_data:
+            continue
+
+        # Extract all configurable fields
+        speed_limits = _extract_wifi_speed_limit(client_data)
+        locked_enabled = client_data.get("fixed_ap_enabled", False)
+        locked_ap_mac = client_data.get("fixed_ap_mac") or ""
+        use_fixed_ip = client_data.get("use_fixedip", False)
+        fixed_ip = client_data.get("fixed_ip") or ""
+        local_dns_enabled = client_data.get("local_dns_record_enabled", False)
+        local_dns_record = client_data.get("local_dns_record") or ""
+
+        export_data = {
+            "mac": mac.lower(),
+            "hostname": client_data.get("hostname") or "",
+            "name": client_data.get("name") or "",
+            "note": client_data.get("note") or "",
+            "speed_limits": speed_limits,
+            "locked": {
+                "enabled": locked_enabled,
+                "ap_mac": locked_ap_mac
+            },
+            "ip_settings": {
+                "use_fixed_ip": use_fixed_ip,
+                "fixed_ip": fixed_ip,
+                "local_dns_enabled": local_dns_enabled,
+                "local_dns_record": local_dns_record
+            }
+        }
+        clients.append(export_data)
+
+    return clients
+
+
+def restore_client_data(client_data: dict, dry_run: bool = False) -> dict:
+    """
+    Restore a client's data from export format.
+
+    This function gracefully handles version-specific attributes:
+    - WiFi speed limits are only applied if the controller supports them
+    - Gateway-specific attributes are skipped if not available
+    - Each attribute is attempted independently, with failures logged
+
+    Args:
+        client_data: Client data in export format
+        dry_run: If True, only simulate the restore without making changes
+
+    Returns:
+        dict: {
+            "success": bool,
+            "applied": list of successfully applied attributes,
+            "skipped": list of skipped attributes with reasons,
+            "failed": list of failed attributes with errors
+        }
+    """
+    mac = client_data.get("mac")
+    if not mac:
+        return {
+            "success": False,
+            "applied": [],
+            "skipped": [],
+            "failed": [{"attribute": "mac", "reason": "missing"}]
+        }
+
+    # Dry run: no API calls needed - just report what would be applied
+    if dry_run:
+        result = {
+            "success": True,
+            "applied": [],
+            "skipped": [],
+            "failed": [],
+            "locked_ap_mac": None,
+            "client_type": "existing",  # Will be updated if client is new
+            "previous_ap_name": client_data.get("previous_ap_name", ""),
+            "details": {}  # Field name -> value mappings
+        }
+
+        # Check what would be applied from the backup data
+        if client_data.get("name", ""):
+            result["applied"].append("name")
+            result["details"]["name"] = client_data.get("name", "")
+        if client_data.get("note", ""):
+            result["applied"].append("note")
+            result["details"]["note"] = client_data.get("note", "")
+        if client_data.get("locked", {}).get("enabled", False):
+            result["applied"].append("locked")
+            locked_ap_mac = client_data.get("locked", {}).get("ap_mac")
+            if locked_ap_mac:
+                result["locked_ap_mac"] = locked_ap_mac
+        ip_settings = client_data.get("ip_settings", {})
+        if ip_settings.get("use_fixed_ip", False) or ip_settings.get("local_dns_enabled", False):
+            result["applied"].append("ip_settings")
+            if ip_settings.get("use_fixed_ip", False):
+                result["details"]["fixed_ip"] = ip_settings.get("fixed_ip", "")
+            if ip_settings.get("local_dns_enabled", False):
+                result["details"]["local_dns_record"] = ip_settings.get("local_dns_record", "")
+        if client_data.get("speed_limits"):
+            result["applied"].append("speed_limits")
+
+        return result
+
+    # Actual restore: fetch client data and apply changes
+    existing_client = _get_single_client_data_by_mac(mac)
+    client_type = "existing"
+
+    if not existing_client:
+        # Client was deleted - need to recreate it with all saved data
+        client_type = "new"
+        # Use add_client to create the client with all saved attributes
+        return restore_deleted_client(mac, client_data)
+
+    client_id = existing_client.get("_id")
+    if not client_id:
+        return {
+            "success": False,
+            "applied": [],
+            "skipped": [],
+            "failed": [{"attribute": "client_id", "reason": "missing"}]
+        }
+
+    endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user/{client_id}"
+
+    # Build the base payload with universal attributes
+    payload = build_client_payload(existing_client)
+
+    # Track results - initialize before using it
+    result = {
+        "success": True,
+        "applied": [],
+        "skipped": [],
+        "failed": [],
+        "locked_ap_mac": None,
+        "client_type": client_type,
+        "previous_ap_name": client_data.get("previous_ap_name", ""),
+        "details": {}  # Field name -> value mappings
+    }
+
+    # Apply name if provided and not empty (skip if greyed out by external source)
+    new_name = client_data.get("name", "")
+    if new_name:
+        payload["name"] = new_name
+        payload["display_name"] = new_name
+        result["details"]["name"] = new_name
+
+    # Apply note
+    new_note = client_data.get("note", "")
+    if new_note:
+        payload["note"] = new_note
+        result["details"]["note"] = new_note
+
+    # Apply locking settings
+    locked = client_data.get("locked", {})
+    if locked.get("enabled", False):
+        payload["fixed_ap_enabled"] = True
+        locked_ap_mac = locked.get("ap_mac")
+        if locked_ap_mac:
+            payload["fixed_ap_mac"] = locked_ap_mac.lower()
+            result["details"]["locked"] = f"locked to AP: {locked_ap_mac}"
+    else:
+        payload["fixed_ap_enabled"] = False
+        # Remove fixed_ap_mac if present (must be absent for unlock)
+        if "fixed_ap_mac" in payload:
+            del payload["fixed_ap_mac"]
+        result["details"]["locked"] = "unlocked"
+
+    # Apply IP settings
+    ip_settings = client_data.get("ip_settings", {})
+    if ip_settings.get("use_fixed_ip", False):
+        payload["use_fixedip"] = True
+        payload["fixed_ip"] = ip_settings.get("fixed_ip", "")
+        result["details"]["fixed_ip"] = ip_settings.get("fixed_ip", "")
+    else:
+        payload["use_fixedip"] = False
+        payload["fixed_ip"] = ""
+
+    if ip_settings.get("local_dns_enabled", False):
+        payload["local_dns_record_enabled"] = True
+        payload["local_dns_record"] = ip_settings.get("local_dns_record", "")
+        result["details"]["local_dns_record"] = ip_settings.get("local_dns_record", "")
+    else:
+        payload["local_dns_record_enabled"] = False
+        payload["local_dns_record"] = ""
+
+    # Get speed limits (defined outside dry_run block for use in both branches)
+    speed_limits = client_data.get("speed_limits", {})
+
+    # Track locked AP MAC for reporting
+    locked_ap_mac = locked.get("ap_mac") if locked.get("enabled", False) else None
+
+    try:
+        # First attempt: send the universal payload
+        make_unifi_api_call("PUT", endpoint, json=payload)
+
+        # Apply WiFi speed limits (gateway-specific, may fail on non-gateway)
+        if speed_limits:
+            # Try to apply speed limits via a separate call if needed
+            # Note: These may not be restorable on non-gateway controllers
+            # We attempt a PUT to /rest/user with speed limit fields
+            speed_payload = payload.copy()
+            for key, value in speed_limits.items():
+                speed_payload[key] = value
+
+            try:
+                make_unifi_api_call("PUT", endpoint, json=speed_payload)
+                result["applied"].extend(speed_limits.keys())
+            except Exception as e:
+                # Speed limits not supported - skip gracefully
+                result["skipped"].extend([
+                    {"attribute": k, "reason": "not supported on this controller"}
+                    for k in speed_limits.keys()
+                ])
+        else:
+            result["applied"].append("speed_limits")
+
+        result["applied"].extend(["name", "note", "locked", "ip_settings"])
+        verified, mismatches = _verify_restored_client_fields_with_retry(mac, client_data)
+        if not verified:
+            result["success"] = False
+            for mismatch in mismatches:
+                result["failed"].append({"attribute": "verification", "error": mismatch})
+
+    except Exception as e:
+        result["success"] = False
+        result["failed"].append({"attribute": "universal_payload", "error": str(e)})
+
+    # Store locked AP MAC for reporting
+    if locked_ap_mac:
+        result["locked_ap_mac"] = locked_ap_mac
+
+    return result
+
+
+def _verify_restored_client_fields(mac: str, client_data: dict) -> tuple[bool, list]:
+    """Re-fetch a restored client and verify the important persisted fields."""
+    stored = _get_single_client_data_by_mac(mac)
+    if not stored:
+        return False, ["client not found after restore"]
+
+    mismatches = []
+
+    expected_name = client_data.get("name", "")
+    if expected_name and stored.get("name", "") != expected_name:
+        mismatches.append(f"name expected {expected_name!r}, got {stored.get('name', '')!r}")
+
+    expected_note = client_data.get("note", "")
+    if expected_note and stored.get("note", "") != expected_note:
+        mismatches.append(f"note expected {expected_note!r}, got {stored.get('note', '')!r}")
+
+    expected_locked = bool(client_data.get("locked", {}).get("enabled", False))
+    actual_locked = bool(stored.get("fixed_ap_enabled", False))
+    if actual_locked != expected_locked:
+        mismatches.append(f"fixed_ap_enabled expected {expected_locked!r}, got {actual_locked!r}")
+
+    if expected_locked:
+        expected_locked_mac = (client_data.get("locked", {}).get("ap_mac") or "").lower()
+        actual_locked_mac = (stored.get("fixed_ap_mac") or "").lower()
+        if expected_locked_mac and actual_locked_mac != expected_locked_mac:
+            mismatches.append(f"fixed_ap_mac expected {expected_locked_mac!r}, got {actual_locked_mac!r}")
+
+    return len(mismatches) == 0, mismatches
+
+
+def _verify_restored_client_fields_with_retry(mac: str, client_data: dict, attempts: int = 4, delay_seconds: float = 0.5) -> tuple[bool, list]:
+    """Retry restore verification a few times for eventually consistent controller writes."""
+    last_mismatches = []
+    for attempt in range(attempts):
+        verified, mismatches = _verify_restored_client_fields(mac, client_data)
+        if verified:
+            return True, []
+        last_mismatches = mismatches
+        if attempt < attempts - 1:
+            time.sleep(delay_seconds)
+    return False, last_mismatches
+
+
+def restore_deleted_client(mac: str, client_data: dict) -> dict:
+    """
+    Restore a deleted client by creating a new entry with all saved attributes.
+
+    Args:
+        mac: The MAC address of the deleted client
+        client_data: The client data from backup
+
+    Returns:
+        dict: Result of the restore operation
+    """
+    result = {
+        "success": True,
+        "applied": [],
+        "skipped": [],
+        "failed": [],
+        "locked_ap_mac": None,
+        "client_type": "new",  # Mark this as a new client creation
+        "previous_ap_name": client_data.get("previous_ap_name", "")
+    }
+
+    # Build payload for new client creation
+    payload = {
+        "mac": mac.lower(),
+        "blocked": False,
+        "display_name": client_data.get("name", ""),
+        "name": client_data.get("name", ""),
+        "note": client_data.get("note", ""),
+        "usergroup_id": "",
+        "ok_to_leave": True,
+        "is_guest": False,
+        "vlan": "",
+        "fixed_ip": "",
+        "fixedip_enabled": False,
+        "description": client_data.get("note", ""),
+        "is_wired": True,  # Default to wired (will be updated when client connects)
+        "first_seen": int(datetime.datetime.now().timestamp() * 1000),
+        "last_seen": int(datetime.datetime.now().timestamp() * 1000),
+        "is_11ax": False,
+        "site_id": UNIFI_SITE_ID,
+        "is_ap": False,
+        "is_guest_by_uap": False,
+        "is_wired_by_uap": True,
+        "network_id": ""
+    }
+
+    # Apply locking settings
+    locked = client_data.get("locked", {})
+    if locked.get("enabled", False):
+        locked_ap_mac = locked.get("ap_mac")
+        if locked_ap_mac:
+            payload["fixed_ap_mac"] = locked_ap_mac.lower()
+            payload["fixed_ap_enabled"] = True
+            result["applied"].append("locked")
+            result["locked_ap_mac"] = locked_ap_mac
+    else:
+        result["applied"].append("locked")
+
+    # Apply IP settings
+    ip_settings = client_data.get("ip_settings", {})
+    if ip_settings.get("use_fixed_ip", False):
+        payload["fixed_ip"] = ip_settings.get("fixed_ip", "")
+        payload["fixedip_enabled"] = True
+        result["applied"].append("fixed_ip")
+    if ip_settings.get("local_dns_enabled", False):
+        payload["local_dns_record"] = ip_settings.get("local_dns_record", "")
+        payload["local_dns_record_enabled"] = True
+        result["applied"].append("local_dns")
+
+    # Track name and note
+    if client_data.get("name", ""):
+        result["applied"].append("name")
+    if client_data.get("note", ""):
+        result["applied"].append("note")
+
+    # Create the client
+    endpoint = f"/api/s/{UNIFI_SITE_ID}/rest/user"
+    try:
+        make_unifi_api_call("POST", endpoint, json=payload)
+        verified, mismatches = _verify_restored_client_fields_with_retry(mac, client_data)
+        if not verified:
+            result["success"] = False
+            for mismatch in mismatches:
+                result["failed"].append({"attribute": "verification", "error": mismatch})
+    except Exception as e:
+        result["success"] = False
+        result["failed"].append({"attribute": "create_client", "error": str(e)})
+
+    return result
