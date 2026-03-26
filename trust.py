@@ -18,6 +18,7 @@ handle certificate trust operations via their own arguments.
 import subprocess
 import tempfile
 import sys
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 from http_tls_nss import get_server_certificate
@@ -359,38 +360,54 @@ def format_nss_error(server_name: str, server_url: str, error: Exception, prog_n
     Returns:
         str: Formatted error message with suggestion
     """
-    error_str = str(error)
-
-    if isinstance(error, nss.error.NSPRError):
-        # Extract error code (e.g., SEC_ERROR_UNTRUSTED_ISSUER)
-        error_code = error_str.split(")")[0].strip("(") if "(" in error_str else "UNKNOWN"
-
-        message = f"""
-ERROR: CERTIFICATE NOT TRUSTED: {server_name}
-
-URL: {server_url}
-Error: {error_str}
-
-This means the {server_name}'s certificate is not trusted.
-
-To fix this, you have two options:
-
-OPTION 1 (Preferred, if the certificate was issued by a separate CA, and you have the CA certificate file):
-  If you have the trusted CA certificate (ASCII PEM or binary DER format), run:
-  {prog_name} trust --ca /path/to/[ca_cert.pem|ca_cert.der]
-
-  This will trust all certificates signed by that CA.
-
-OPTION 2 (Trust the server certificate directly):
-  If you don't have the CA file, or the server certificate is self-signed or self-issued, run:
-  {prog_name} trust --server {server_url}
-
-  This will fetch the certificate, display its fingerprint for verification,
-  and add it to the trusted certificate store.
-"""
-        return message.strip()
-    else:
+    if not isinstance(error, nss.error.NSPRError):
         return str(error)
+
+    error_code = getattr(error, "error_code", getattr(error, "errno", None))
+    error_desc = getattr(error, "error_desc", "") or ""
+    error_name_match = re.match(r"^\(([^)]+)\)", error_desc)
+    error_name = error_name_match.group(1) if error_name_match else "UNKNOWN"
+    resolved_message = None
+
+    if error_code is not None:
+        resolved_message = nss.error.get_nspr_error_string(error_code)
+
+    raw_error = str(error)
+    header = "ERROR: NSPR/NSS FAILURE"
+    details = [
+        f"{header}: {server_name}",
+        "",
+        f"URL: {server_url}",
+        f"NSPR/NSS code: {error_name} ({error_code})" if error_code is not None else f"NSPR/NSS code: {error_name}",
+    ]
+
+    if resolved_message:
+        details.append(f"Description: {resolved_message}")
+
+    if raw_error and raw_error != resolved_message:
+        details.append(f"Raw error: {raw_error}")
+
+    # Trust commands are only relevant when NSS reports issuer/certificate trust problems.
+    if error_name in {"SEC_ERROR_UNTRUSTED_ISSUER", "SEC_ERROR_UNKNOWN_ISSUER", "SEC_ERROR_UNTRUSTED_CERT"}:
+        details.extend([
+            "",
+            f"This means the {server_name} certificate chain is not trusted by NSS.",
+            "",
+            "To fix this, you have two options:",
+            "",
+            "OPTION 1 (Preferred, if you have the issuing CA certificate file):",
+            f"  {prog_name} trust --ca /path/to/[ca_cert.pem|ca_cert.der]",
+            "",
+            "  This will trust all certificates signed by that CA.",
+            "",
+            "OPTION 2 (Trust the server certificate directly):",
+            f"  {prog_name} trust --server {server_url}",
+            "",
+            "  This will fetch the certificate, display its fingerprint for verification,",
+            "  and add it to the trusted certificate store.",
+        ])
+
+    return "\n".join(details).strip()
 
 
 # ==============================================================================
