@@ -92,12 +92,13 @@ export PFSENSE_DHCP_INTERFACE="lan"         # pfSense interface (default: "lan")
 Trust a CA certificate:
 ```bash
 ./pfsense2unifi.py trust --ca /path/to/ca_cert.pem
+./unifi_climgr.py trust --ca /path/to/ca_cert.pem
 ```
 
 Trust a server certificate:
 ```bash
-./pfsense2unifi.py trust --server $UNIFI_NETWORK_URL
-./unifi_climgr.py trust --server $PFSENSE_URL
+./pfsense2unifi.py trust --server $PFSENSE_URL
+./unifi_climgr.py trust --server $UNIFI_NETWORK_URL
 ```
 
 ## Project Structure

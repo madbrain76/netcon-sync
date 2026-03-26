@@ -24,6 +24,7 @@ import urllib.request
 import urllib.error
 import socket
 import hashlib
+import nss.nss
 import nss.io
 import nss.ssl
 
@@ -285,11 +286,61 @@ def get_server_certificate(hostname, port=443):
             - 'der': Raw DER certificate data (bytes)
             - 'sha1': SHA-1 fingerprint (hex string)
             - 'sha256': SHA-256 fingerprint (hex string)
+            - 'subject': Leaf certificate subject DN string
+            - 'issuer': Leaf certificate issuer DN string
+            - 'serial_number': Leaf certificate serial number
+            - 'not_before': Leaf certificate notBefore string (UTC)
+            - 'not_after': Leaf certificate notAfter string (UTC)
+            - 'subject_alt_names': Subject alternative names as labeled strings
+            - 'chain': Tuple of per-certificate metadata dicts, leaf first when available
 
     Raises:
         Exception: If connection or certificate extraction fails
     """
     extracted_cert = {}
+
+    def _format_serial_number(serial_number):
+        """Convert NSS serial number values to a readable hex string."""
+        if serial_number is None:
+            return "unknown"
+        if isinstance(serial_number, bytes):
+            return serial_number.hex().upper()
+        if isinstance(serial_number, int):
+            return f"{serial_number:X}"
+
+        data = getattr(serial_number, "data", None)
+        if isinstance(data, bytes):
+            return data.hex().upper()
+
+        raw = str(serial_number).strip()
+        if raw.startswith("0x") or raw.startswith("0X"):
+            return raw[2:].upper()
+        return raw
+
+    def _extract_subject_alt_names(cert):
+        """Extract subjectAltName entries if present."""
+        try:
+            extension = cert.get_extension(nss.nss.SEC_OID_X509_SUBJECT_ALT_NAME)
+        except KeyError:
+            return ()
+        except Exception:
+            return ()
+
+        try:
+            return tuple(nss.nss.x509_alt_name(extension.value, nss.nss.AsLabeledString))
+        except Exception:
+            return ()
+
+    def _describe_certificate(cert):
+        """Normalize NSS certificate metadata for display."""
+        return {
+            "subject": str(getattr(cert, "subject", "")),
+            "issuer": str(getattr(cert, "issuer", "")),
+            "serial_number": _format_serial_number(getattr(cert, "serial_number", None)),
+            "not_before": getattr(cert, "valid_not_before_str", "") or "unknown",
+            "not_after": getattr(cert, "valid_not_after_str", "") or "unknown",
+            "subject_alt_names": _extract_subject_alt_names(cert),
+        }
 
     def auth_cert_callback(sock, check_sig, is_server):
         """Certificate authentication callback - called during TLS handshake."""
@@ -297,6 +348,15 @@ def get_server_certificate(hostname, port=443):
             peer_cert = sock.get_peer_certificate()
             if peer_cert is not None:
                 extracted_cert['der'] = peer_cert.der_data
+                extracted_cert['details'] = _describe_certificate(peer_cert)
+                try:
+                    chain = peer_cert.get_cert_chain(usages=nss.nss.certUsageSSLServer)
+                except TypeError:
+                    chain = peer_cert.get_cert_chain()
+                except Exception:
+                    chain = ()
+                if chain:
+                    extracted_cert['chain'] = tuple(_describe_certificate(cert) for cert in chain)
             return True
         except Exception:
             return True
@@ -353,7 +413,14 @@ def get_server_certificate(hostname, port=443):
         return {
             "der": der_data,
             "sha1": sha1,
-            "sha256": sha256
+            "sha256": sha256,
+            "subject": extracted_cert.get("details", {}).get("subject", "unknown"),
+            "issuer": extracted_cert.get("details", {}).get("issuer", "unknown"),
+            "serial_number": extracted_cert.get("details", {}).get("serial_number", "unknown"),
+            "not_before": extracted_cert.get("details", {}).get("not_before", "unknown"),
+            "not_after": extracted_cert.get("details", {}).get("not_after", "unknown"),
+            "subject_alt_names": extracted_cert.get("details", {}).get("subject_alt_names", ()),
+            "chain": extracted_cert.get("chain", ()),
         }
 
     except Exception as e:

@@ -282,6 +282,27 @@ def interactive_trust_server_cert(nss_db_dir, hostname: str, port: int = 443) ->
         # Fetch fingerprints
         fingerprints = get_cert_fingerprints(hostname, port)
 
+        def _print_cert_block(title: str, cert_info: dict, include_fingerprints: bool = False) -> None:
+            """Render a certificate summary for interactive confirmation."""
+            print(title)
+            print(f"  Subject:      {cert_info.get('subject', 'unknown')}")
+            print(f"  Issuer:       {cert_info.get('issuer', 'unknown')}")
+            print(f"  Serial:       {cert_info.get('serial_number', 'unknown')}")
+            print(f"  Not Before:   {cert_info.get('not_before', 'unknown')}")
+            print(f"  Not After:    {cert_info.get('not_after', 'unknown')}")
+
+            alt_names = cert_info.get("subject_alt_names") or ()
+            if alt_names:
+                print("  Alt Names:")
+                for alt_name in alt_names:
+                    print(f"    - {alt_name}")
+            else:
+                print("  Alt Names:    none")
+
+            if include_fingerprints:
+                print(f"  SHA-1:        {fingerprints['sha1']}")
+                print(f"  SHA-256:      {fingerprints['sha256']}")
+
         # Display certificate details to user
         print("\n" + "="*70)
         print("CERTIFICATE DETAILS")
@@ -289,12 +310,23 @@ def interactive_trust_server_cert(nss_db_dir, hostname: str, port: int = 443) ->
         print(f"Hostname: {hostname}")
         print(f"Port:     {port}")
         print()
-        print(f"SHA-1:   {fingerprints['sha1']}")
-        print(f"SHA-256: {fingerprints['sha256']}")
+
+        _print_cert_block("Leaf Certificate:", fingerprints, include_fingerprints=True)
+
+        chain = fingerprints.get("chain") or ()
+        if chain:
+            print()
+            print("Received Certificate Chain:")
+            for index, cert_info in enumerate(chain, start=1):
+                print(f"  [{index}]")
+                _print_cert_block("", cert_info, include_fingerprints=False)
+                if index != len(chain):
+                    print()
+
         print("="*70)
 
         # Ask for confirmation
-        print("\nPlease verify these fingerprints match your server's certificate.")
+        print("\nPlease verify these certificate details match what you expect from the server.")
         response = input("Do you trust this certificate? (type 'yes' or 'y' to accept): ").strip().lower()
 
         if response not in ('yes', 'y'):

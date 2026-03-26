@@ -3134,6 +3134,9 @@ EXAMPLES:
 
 CERTIFICATE MANAGEMENT:
 
+  # Trust a CA/root certificate
+  ./unifi_climgr.py trust --ca /path/to/rootCA.pem
+
   # Trust a self-signed certificate
   ./unifi_climgr.py trust https://192.168.1.100:8443
         """

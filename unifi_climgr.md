@@ -710,14 +710,14 @@ echo $UNIFI_NETWORK_URL $UNIFI_USERNAME $UNIFI_PASSWORD
 
 If you get certificate validation errors:
 
-**Option 1: Trust the server directly**
-```bash
-./unifi_climgr.py trust --server https://192.168.1.100:8443
-```
-
-**Option 2: Trust a CA certificate**
+**Option 1: Trust a CA certificate**
 ```bash
 ./unifi_climgr.py trust --ca /path/to/ca.pem
+```
+
+**Option 2: Trust the server directly**
+```bash
+./unifi_climgr.py trust --server https://192.168.1.100:8443
 ```
 
 ### Connection Issues
