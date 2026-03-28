@@ -20,6 +20,7 @@ def test_format_nss_error_uses_actual_connection_reset_code():
 
     assert "PR_CONNECT_RESET_ERROR" in message
     assert "TCP connection reset by peer." in message
+    assert "transport-level connection failure" in message
     assert "CERTIFICATE NOT TRUSTED" not in message
     assert "trust --server" not in message
 

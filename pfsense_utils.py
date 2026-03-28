@@ -11,6 +11,7 @@
 
 import json
 import re
+import urllib.error
 from urllib.parse import urlparse, urlencode
 import nss.error
 from config import load_pfsense_config
@@ -22,6 +23,30 @@ _PFSENSE_APIV2_KEY = None
 _PFSENSE_DHCP_INTERFACE = None
 _config_loaded = False
 _config_error = None
+
+
+class PfSenseAPIError(Exception):
+    """Base exception for pfSense API request failures."""
+
+
+class PfSenseHTTPError(PfSenseAPIError):
+    """HTTP-level pfSense API failure with a concrete status code."""
+
+    def __init__(self, status_code: int, response_body: str = ""):
+        self.status_code = status_code
+        self.response_body = response_body
+        message = f"HTTP {status_code}"
+        if response_body:
+            message += f": {response_body}"
+        super().__init__(message)
+
+
+class PfSenseTransportError(PfSenseAPIError):
+    """Transport-level pfSense API failure before an HTTP response exists."""
+
+    def __init__(self, cause):
+        self.cause = cause
+        super().__init__(f"Transport error: {cause}")
 
 
 def _ensure_pfsense_config_loaded():
@@ -84,6 +109,8 @@ def _fetch_dhcp_with_retry(api_endpoint: str, headers: dict, params: dict) -> di
 
     Raises:
         NSPRError: If certificate validation fails (no retry)
+        PfSenseHTTPError: If pfSense returns an HTTP error response
+        PfSenseTransportError: If transport fails before an HTTP response exists
         Exception: If all retries are exhausted or error occurs
         json.JSONDecodeError: If response is invalid JSON
     """
@@ -105,17 +132,31 @@ def _fetch_dhcp_with_retry(api_endpoint: str, headers: dict, params: dict) -> di
             response_text = response.read().decode('utf-8')
 
             if 400 <= response.getcode() < 600:
-                raise Exception(f"HTTP {response.getcode()}: {response_text}")
+                raise PfSenseHTTPError(response.getcode(), response_text)
 
             return json.loads(response_text)
         except nss.error.NSPRError as e:
             # NSS/NSPR certificate errors are not retryable - re-raise immediately
             raise
+        except urllib.error.HTTPError as e:
+            last_error = PfSenseHTTPError(
+                e.code,
+                e.read().decode('utf-8', errors='replace'),
+            )
+            if attempt >= max_attempts:
+                raise last_error
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", None)
+            if isinstance(reason, nss.error.NSPRError):
+                raise reason
+            last_error = PfSenseTransportError(reason or e)
+            if attempt >= max_attempts:
+                raise last_error
         except Exception as e:
-            last_error = e
+            last_error = PfSenseTransportError(e)
             # If this is the last attempt, raise
             if attempt >= max_attempts:
-                raise e
+                raise last_error
 
             # No delay - fail fast on transient errors
 
@@ -169,6 +210,7 @@ def get_pfsense_dhcp_static_mappings(interface_name: str = None) -> list:
         raise
     except json.JSONDecodeError as e:
         raise json.JSONDecodeError(f"Data parsing error: Invalid JSON response from {api_endpoint}", "", 0) from e
+    except PfSenseAPIError:
+        raise
     except Exception as e:
         raise Exception(f"Failed to fetch DHCP config from {api_endpoint} (retried 3 times): {e}") from e
-

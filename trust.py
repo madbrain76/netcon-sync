@@ -387,6 +387,17 @@ def format_nss_error(server_name: str, server_url: str, error: Exception, prog_n
     if raw_error and raw_error != resolved_message:
         details.append(f"Raw error: {raw_error}")
 
+    # PR_* connection failures are transport-level errors, not certificate errors.
+    # NSS' label is useful, but it can be overly specific from the user's point of view
+    # because it reflects the failing connect attempt NSS observed.
+    if error_name.startswith("PR_"):
+        details.extend([
+            "",
+            "This is a transport-level connection failure reported by NSS while connecting.",
+            "The specific PR_* label reflects NSS's view of the failed connect attempt and may",
+            "not uniquely identify the overall controller problem.",
+        ])
+
     # Trust commands are only relevant when NSS reports issuer/certificate trust problems.
     if error_name in {"SEC_ERROR_UNTRUSTED_ISSUER", "SEC_ERROR_UNKNOWN_ISSUER", "SEC_ERROR_UNTRUSTED_CERT"}:
         details.extend([

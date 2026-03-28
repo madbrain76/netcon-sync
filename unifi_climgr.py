@@ -4460,9 +4460,7 @@ LIMITATIONS:
 
             def _format_adopt_wait_error(result):
                 error = result.get('error', 'not ready yet')
-                if 'HTTP Error 400' in error:
-                    return 'not ready for adoption yet'
-                if error.startswith('Network or API error during POST'):
+                if result.get('status_code') == 400:
                     return 'not ready for adoption yet'
                 return error
 
@@ -4875,7 +4873,11 @@ LIMITATIONS:
                                         print(f"[UPGRADABLE] {current} -> {new}")
                                     else:
                                         # Get initial state before the upgrade was initiated
-                                        initial_state = unifi_utils.get_ap_state(ap_mac)
+                                        try:
+                                            initial_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                        except Exception as e:
+                                            print(f"[FAIL] Controller query failed before verification: {e}\n", flush=True)
+                                            continue
 
                                         command_issue_time = time.time()
                                         initiation_time_str = datetime.now().strftime("%H:%M:%S")
@@ -4896,7 +4898,11 @@ LIMITATIONS:
                                             retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
                                             if retry_result['success'] and not retry_result.get('skip_initiation'):
                                                 # Check for upgrade activity again after retry
-                                                retry_initial_state = unifi_utils.get_ap_state(ap_mac)
+                                                try:
+                                                    retry_initial_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                                except Exception as e:
+                                                    print(f"  [FAIL] Controller query failed before retry verification: {e}. Skipping this AP.\n", flush=True)
+                                                    continue
                                                 retry_verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, retry_initial_state)
                                                 if retry_verify_result['success']:
                                                     print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n", flush=True)
@@ -4966,8 +4972,12 @@ LIMITATIONS:
                         for ap_mac in list(aps_upgrading.keys()):
                             if ap_mac not in completed_aps:
                                 ap_info = aps_upgrading[ap_mac]
-                                current_version = unifi_utils.get_ap_current_version(ap_mac)
-                                current_state = unifi_utils.get_ap_state(ap_mac)
+                                try:
+                                    current_version = unifi_utils.get_ap_current_version(ap_mac, raise_on_error=True)
+                                    current_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                except Exception as e:
+                                    print(f"[WARN] {ap_info['name']}: Controller query failed during upgrade monitoring: {e}", flush=True)
+                                    continue
 
                                 # Detect state reversion: UPGRADING -> UPGRADABLE (upgrade dropped without progress)
                                 if ap_mac in ap_states:
@@ -5021,10 +5031,17 @@ LIMITATIONS:
                                     print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)", flush=True)
 
                                 # Check if upgrade is actively progressing
-                                elif unifi_utils.is_ap_actively_upgrading(ap_mac):
-                                    # Update progress time - active upgrade is progressing
-                                    last_progress_time = time.time()
-                                    no_progress_displayed = False
+                                else:
+                                    try:
+                                        actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac, raise_on_error=True)
+                                    except Exception as e:
+                                        print(f"[WARN] {ap_info['name']}: Controller query failed while checking upgrade activity: {e}", flush=True)
+                                        continue
+
+                                    if actively_upgrading:
+                                        # Update progress time - active upgrade is progressing
+                                        last_progress_time = time.time()
+                                        no_progress_displayed = False
 
                         # Check for stalled upgrades - if no progress for 60 seconds, report failure
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
@@ -5035,10 +5052,14 @@ LIMITATIONS:
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
                                     ap_info = aps_upgrading[ap_mac]
-                                    ap_state = unifi_utils.get_ap_state(ap_mac)
+                                    try:
+                                        ap_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                        current_version = unifi_utils.get_ap_current_version(ap_mac, raise_on_error=True)
+                                        is_actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac, raise_on_error=True)
+                                    except Exception as e:
+                                        print(f"  {ap_info['name']}: controller query failed ({e}) - still monitoring")
+                                        continue
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
-                                    current_version = unifi_utils.get_ap_current_version(ap_mac)
-                                    is_actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac)
 
                                     # Report as failed if version hasn't changed and upgrade is NOT actively in progress
                                     # (Even if upgrade_to_firmware is queued, if it hasn't started after 60s, it failed)
@@ -5150,7 +5171,11 @@ LIMITATIONS:
                                 if dry_run:
                                     print(f"[UPGRADABLE] {current} -> {new}")
                                 else:
-                                    # Get initial state before the upgrade was initiatedinitial_state = unifi_utils.get_ap_state(ap_mac)
+                                    try:
+                                        initial_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                    except Exception as e:
+                                        print(f"[FAIL] Controller query failed before verification: {e}\n", flush=True)
+                                        continue
 
                                     command_issue_time = time.time()
                                     initiation_time_str = datetime.now().strftime("%H:%M:%S")
@@ -5170,7 +5195,11 @@ LIMITATIONS:
                                         retry_result = unifi_utils.upgrade_ap_firmware(ap_mac, dry_run=False)
                                         if retry_result['success'] and not retry_result.get('skip_initiation'):
                                             # Check for upgrade activity again after retry
-                                            retry_initial_state = unifi_utils.get_ap_state(ap_mac)
+                                            try:
+                                                retry_initial_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                            except Exception as e:
+                                                print(f"  [FAIL] Controller query failed before retry verification: {e}. Skipping this AP.\n", flush=True)
+                                                continue
                                             retry_verify_result = unifi_utils.verify_upgrade_initiated(ap_mac, retry_initial_state)
                                             if retry_verify_result['success']:
                                                 print(f"  [OK] Upgrade detected (retry): {retry_verify_result['message']}\n", flush=True)
@@ -5240,7 +5269,12 @@ LIMITATIONS:
                             if ap_mac not in completed_aps:
                                 ap_info = aps_upgrading[ap_mac]
                                 current_version = unifi_utils.get_ap_current_version(ap_mac)
-                                current_state = unifi_utils.get_ap_state(ap_mac)
+                                try:
+                                    current_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                    current_version = unifi_utils.get_ap_current_version(ap_mac, raise_on_error=True)
+                                except Exception as e:
+                                    print(f"[WARN] {ap_info['name']}: Controller query failed during upgrade monitoring: {e}", flush=True)
+                                    continue
 
                                 # Detect state reversion: UPGRADING -> UPGRADABLE (upgrade dropped without progress)
                                 if ap_mac in ap_states:
@@ -5294,10 +5328,17 @@ LIMITATIONS:
                                     print(f"[OK] Successful upgrade: {ap_info['name']} -> {current_version} at {completion_time_str} (took {duration_minutes}m:{duration_secs:02d}s)", flush=True)
 
                                 # Check if upgrade is actively progressing (upgrade_progress > 0)
-                                elif unifi_utils.is_ap_actively_upgrading(ap_mac):
-                                    # Update progress time - active upgrade is progressing
-                                    last_progress_time = time.time()
-                                    no_progress_displayed = False
+                                else:
+                                    try:
+                                        actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac, raise_on_error=True)
+                                    except Exception as e:
+                                        print(f"[WARN] {ap_info['name']}: Controller query failed while checking upgrade activity: {e}", flush=True)
+                                        continue
+
+                                    if actively_upgrading:
+                                        # Update progress time - active upgrade is progressing
+                                        last_progress_time = time.time()
+                                        no_progress_displayed = False
 
                         # Check for stalled upgrades - if no progress for 60 seconds, report failure
                         if time_since_progress > no_progress_threshold and not no_progress_displayed:
@@ -5308,10 +5349,14 @@ LIMITATIONS:
                             for ap_mac in list(aps_upgrading.keys()):
                                 if ap_mac not in completed_aps:
                                     ap_info = aps_upgrading[ap_mac]
-                                    ap_state = unifi_utils.get_ap_state(ap_mac)
+                                    try:
+                                        ap_state = unifi_utils.get_ap_state(ap_mac, raise_on_error=True)
+                                        current_version = unifi_utils.get_ap_current_version(ap_mac, raise_on_error=True)
+                                        is_actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac, raise_on_error=True)
+                                    except Exception as e:
+                                        print(f"  {ap_info['name']}: controller query failed ({e}) - still monitoring")
+                                        continue
                                     state_desc = unifi_utils._get_ap_state_description(ap_state)
-                                    current_version = unifi_utils.get_ap_current_version(ap_mac)
-                                    is_actively_upgrading = unifi_utils.is_ap_actively_upgrading(ap_mac)
 
                                     # Report as failed if version hasn't changed and upgrade is NOT actively in progress
                                     # (Even if upgrade_to_firmware is queued, if it hasn't started after 60s, it failed)

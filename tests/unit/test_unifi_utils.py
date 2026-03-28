@@ -7,12 +7,15 @@ Run with: pytest tests/unit/test_unifi_utils.py -v
 
 import pytest
 import sys
+import urllib.error
 from pathlib import Path
 from datetime import datetime
 from unittest.mock import Mock, patch, MagicMock
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+import unifi_utils
 
 
 class TestAPHelpers:
@@ -73,6 +76,62 @@ class TestAPHelpers:
             "uplink": {"type": "wire", "up": True},
         }
         assert unifi_utils.is_ap_fully_adopted(device) is True
+
+
+class TestAPIErrorHandling:
+    """Tests for distinguishing HTTP and transport failures."""
+
+    @patch('unifi_utils._get_opener')
+    def test_make_unifi_api_call_wraps_tcp_failure_as_transport_error(self, mock_get_opener):
+        mock_opener = Mock()
+        mock_opener.request.side_effect = urllib.error.URLError(OSError("tcp connect failure"))
+        mock_get_opener.return_value = mock_opener
+
+        with pytest.raises(unifi_utils.UnifiTransportError) as exc_info:
+            unifi_utils.make_unifi_api_call("POST", "/api/s/default/cmd/devmgr", json={"cmd": "restart"})
+
+        assert "Transport error during POST /api/s/default/cmd/devmgr" in str(exc_info.value)
+        assert "HTTP 400" not in str(exc_info.value)
+
+    @patch('unifi_utils.make_unifi_api_call')
+    def test_restart_ap_preserves_transport_error_type(self, mock_api):
+        mock_api.side_effect = unifi_utils.UnifiTransportError("POST", "/api/s/default/cmd/devmgr", "tcp connect failure")
+
+        result = unifi_utils.restart_ap("aa:bb:cc:dd:ee:ff")
+
+        assert result["success"] is False
+        assert result["error_type"] == "transport"
+        assert "tcp connect failure" in result["error"]
+
+    @patch('unifi_utils.make_unifi_api_call')
+    @patch('unifi_utils.get_devices')
+    def test_adopt_ap_preserves_http_status_for_retry_logic(self, mock_get_devices, mock_api):
+        mock_get_devices.return_value = [
+            {"type": "uap", "mac": "aa:bb:cc:dd:ee:ff", "adopted": False}
+        ]
+        mock_api.side_effect = unifi_utils.UnifiHTTPError("POST", "/api/s/default/cmd/devmgr", 400, "Bad Request")
+
+        result = unifi_utils.adopt_ap("aa:bb:cc:dd:ee:ff")
+
+        assert result["success"] is False
+        assert result["error_type"] == "http"
+        assert result["status_code"] == 400
+
+    @patch('unifi_utils.make_unifi_api_call')
+    def test_get_devices_raise_on_error_preserves_transport_failure(self, mock_api):
+        mock_api.side_effect = unifi_utils.UnifiTransportError("GET", "/api/s/default/stat/device", "tcp connect failure")
+
+        with pytest.raises(unifi_utils.UnifiTransportError):
+            unifi_utils.get_devices(raise_on_error=True)
+
+    @patch('unifi_utils.get_devices')
+    def test_upgrade_ap_firmware_reports_controller_query_failure(self, mock_get_devices):
+        mock_get_devices.side_effect = unifi_utils.UnifiTransportError("GET", "/api/s/default/stat/device", "tcp connect failure")
+
+        result = unifi_utils.upgrade_ap_firmware("aa:bb:cc:dd:ee:ff")
+
+        assert result["success"] is False
+        assert "tcp connect failure" in result["message"]
 
 
 class TestClientDataExport:

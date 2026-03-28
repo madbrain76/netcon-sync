@@ -15,6 +15,7 @@ import json
 import re
 import sys
 import time
+import urllib.error
 import nss.error
 import xml.etree.ElementTree as ET
 from config import UNIFI_NETWORK_URL, UNIFI_USERNAME, UNIFI_PASSWORD, UNIFI_SITE_ID, DEFAULT_DOMAIN
@@ -27,6 +28,34 @@ except ImportError:
 
 # Module-level URL opener for session state across requests
 _opener = None
+
+
+class UnifiAPIError(Exception):
+    """Base exception for UniFi API request failures."""
+
+
+class UnifiHTTPError(UnifiAPIError):
+    """HTTP-level UniFi API failure with a concrete status code."""
+
+    def __init__(self, method: str, endpoint: str, status_code: int, response_body: str = ""):
+        self.method = method
+        self.endpoint = endpoint
+        self.status_code = status_code
+        self.response_body = response_body
+        message = f"HTTP {status_code} during {method} {endpoint}"
+        if response_body:
+            message += f": {response_body}"
+        super().__init__(message)
+
+
+class UnifiTransportError(UnifiAPIError):
+    """Transport-level UniFi API failure before an HTTP response exists."""
+
+    def __init__(self, method: str, endpoint: str, cause):
+        self.method = method
+        self.endpoint = endpoint
+        self.cause = cause
+        super().__init__(f"Transport error during {method} {endpoint}: {cause}")
 
 
 def _get_opener():
@@ -185,7 +214,26 @@ def _check_env_vars() -> None:
 
 def _is_retryable_error(exc):
     """Check if an exception is retryable. NSS errors are not retryable."""
-    return not isinstance(exc, nss.error.NSPRError)
+    if isinstance(exc, nss.error.NSPRError):
+        return False
+    if isinstance(exc, UnifiHTTPError):
+        return 500 <= exc.status_code < 600
+    return True
+
+
+def _build_unifi_error_result(exc: Exception) -> dict:
+    """Normalize API exceptions for command result payloads."""
+    details = {"error": str(exc)}
+    if isinstance(exc, UnifiHTTPError):
+        details["error_type"] = "http"
+        details["status_code"] = exc.status_code
+    elif isinstance(exc, UnifiTransportError):
+        details["error_type"] = "transport"
+    elif isinstance(exc, nss.error.NSPRError):
+        details["error_type"] = "nss"
+    else:
+        details["error_type"] = "unknown"
+    return details
 
 
 def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, stream: bool = False, **kwargs):
@@ -211,7 +259,9 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, st
 
     Raises:
         NSPRError: For NSS/NSPR certificate validation errors (no retry).
-        Exception: For network or API errors (after 3 retries).
+        UnifiHTTPError: For HTTP responses with error status codes.
+        UnifiTransportError: For transport failures before an HTTP response exists.
+        Exception: For network or API errors (after retries).
     """
     max_attempts = 3
     attempt = 0
@@ -240,7 +290,7 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, st
             # Check HTTP status before reading body
             if 400 <= response.getcode() < 600:
                 error_msg = response.read().decode('utf-8', errors='replace')
-                raise Exception(f"HTTP {response.getcode()}: {error_msg}")
+                raise UnifiHTTPError(method, endpoint, response.getcode(), error_msg)
 
             # If streaming, return response object for caller to read
             if stream:
@@ -261,22 +311,38 @@ def make_unifi_api_call(method: str, endpoint: str, return_raw: bool = False, st
         except nss.error.NSPRError as e:
             # NSS/NSPR errors are not retryable - raise immediately
             raise
+        except urllib.error.HTTPError as e:
+            last_error = UnifiHTTPError(
+                method,
+                endpoint,
+                e.code,
+                e.read().decode('utf-8', errors='replace'),
+            )
+            if not _is_retryable_error(last_error) or attempt >= max_attempts:
+                raise last_error
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", None)
+            if isinstance(reason, nss.error.NSPRError):
+                raise reason
+            last_error = UnifiTransportError(method, endpoint, reason or e)
+            if attempt >= max_attempts:
+                raise last_error
         except Exception as e:
-            last_error = e
+            last_error = UnifiTransportError(method, endpoint, e)
             # Check if this error is retryable
-            if not _is_retryable_error(e):
-                raise
+            if not _is_retryable_error(last_error):
+                raise last_error
 
             # If this is the last attempt, raise the error
             if attempt >= max_attempts:
-                raise Exception(f"Network or API error during {method} {endpoint}: {e}")
+                raise last_error
 
             # No delay - fail fast on transient errors
 
     # Shouldn't reach here, but just in case
     if last_error:
-        raise Exception(f"Network or API error during {method} {endpoint}: {last_error}")
-    raise Exception(f"Network or API error during {method} {endpoint}: Unknown error")
+        raise last_error
+    raise UnifiTransportError(method, endpoint, "Unknown error")
 
 
 def login() -> None:
@@ -292,7 +358,7 @@ def login() -> None:
     make_unifi_api_call("POST", login_url, json=login_data)
 
 
-def get_devices() -> list:
+def get_devices(raise_on_error: bool = False) -> list:
     """
     Retrieves all devices (APs, switches, gateways, etc.) for the configured site.
 
@@ -305,6 +371,8 @@ def get_devices() -> list:
         devices_data = make_unifi_api_call("GET", endpoint)
         return devices_data if isinstance(devices_data, list) else []
     except Exception as e:
+        if raise_on_error:
+            raise
         print(f"Error retrieving devices: {e}", file=__import__('sys').stderr)
         return []
 
@@ -1053,7 +1121,7 @@ def restart_ap(ap_mac: str) -> dict:
         response = make_unifi_api_call("POST", endpoint, json=payload)
         return {'success': True, 'method': 'controller'}
     except Exception as e:
-        return {'success': False, 'method': None, 'error': str(e)}
+        return {'success': False, 'method': None, **_build_unifi_error_result(e)}
 
 
 def forget_ap(ap_mac: str) -> dict:
@@ -1100,7 +1168,7 @@ def forget_ap(ap_mac: str) -> dict:
         make_unifi_api_call("POST", endpoint, json=payload)
         return {'success': True}
     except Exception as e:
-        return {'success': False, 'error': str(e)}
+        return {'success': False, **_build_unifi_error_result(e)}
 
 
 def adopt_ap(ap_mac: str) -> dict:
@@ -1151,7 +1219,7 @@ def adopt_ap(ap_mac: str) -> dict:
         make_unifi_api_call("POST", endpoint, json=payload)
         return {'success': True}
     except Exception as e:
-        return {'success': False, 'error': str(e)}
+        return {'success': False, **_build_unifi_error_result(e)}
 
 
 def set_ap_name_from_reverse_dns(ap_mac: str) -> dict:
@@ -1527,7 +1595,7 @@ def _get_ap_state_description(state):
     return state_map.get(state, f"UNKNOWN")
 
 
-def get_ap_state(ap_mac: str) -> str:
+def get_ap_state(ap_mac: str, raise_on_error: bool = False) -> str:
     """
     Get the current state of an AP by MAC address.
     Uses intelligent inference from multiple fields (adoption, upgrade status, uptime).
@@ -1547,7 +1615,7 @@ def get_ap_state(ap_mac: str) -> str:
              - "UNKNOWN": AP not found
     """
     try:
-        devices = get_devices()
+        devices = get_devices(raise_on_error=raise_on_error)
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
 
         for device in devices:
@@ -1599,6 +1667,8 @@ def get_ap_state(ap_mac: str) -> str:
 
         return "UNKNOWN"
     except Exception:
+        if raise_on_error:
+            raise
         return "UNKNOWN"
 
 
@@ -1638,7 +1708,7 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
     print(f"Verifying {len(aps_to_upgrade)} AP(s) are ready for upgrade...\n")
 
     # Get full device list to check upgrade states
-    all_devices = get_devices()
+    all_devices = get_devices(raise_on_error=True)
     device_map = {}  # MAC -> full device dict
     for device in all_devices:
         if device.get("type") == "uap":
@@ -1707,7 +1777,7 @@ def check_ap_health_before_upgrade(aps_to_upgrade: list, max_wait_seconds: int =
             still_waiting = []
 
             # Re-fetch device data to get latest upgrade states
-            all_devices = get_devices()
+            all_devices = get_devices(raise_on_error=True)
             device_map = {}
             for device in all_devices:
                 if device.get("type") == "uap":
@@ -1822,7 +1892,7 @@ def check_ap_upgrade_status(ap_mac: str) -> dict:
         dict: Diagnostic information about the AP's upgrade status
     """
     try:
-        devices = get_devices()
+        devices = get_devices(raise_on_error=True)
         matching_ap = None
         target_mac_lower = ap_mac.lower().replace(':', '').replace('-', '')
 
@@ -1916,7 +1986,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
 
     try:
         # Get all devices
-        devices = get_devices()
+        devices = get_devices(raise_on_error=True)
 
         # Find matching AP (case-insensitive MAC)
         matching_ap = None
@@ -2060,8 +2130,7 @@ def upgrade_ap_firmware(ap_mac: str, dry_run: bool = False, skip_health_check: b
             }
         except Exception as e:
             # Some UniFi controllers return HTTP 400 after successfully queuing the upgrade
-            error_str = str(e).lower()
-            if "http error 400" in error_str:
+            if isinstance(e, UnifiHTTPError) and e.status_code == 400:
                 return {
                     "success": True,
                     "current_version": current_version,
@@ -2279,7 +2348,7 @@ def verify_upgrade_initiated(ap_mac: str, initial_state: str) -> dict:
         }
 
 
-def get_ap_current_version(ap_mac: str) -> str:
+def get_ap_current_version(ap_mac: str, raise_on_error: bool = False) -> str:
     """
     Get the current firmware version of an AP.
 
@@ -2290,16 +2359,18 @@ def get_ap_current_version(ap_mac: str) -> str:
         str: The current firmware version, or None if not found
     """
     try:
-        devices = get_devices()
+        devices = get_devices(raise_on_error=raise_on_error)
         for device in devices:
             if device.get("mac", "").lower() == ap_mac.lower():
                 return device.get("version")
         return None
     except Exception:
+        if raise_on_error:
+            raise
         return None
 
 
-def is_ap_actively_upgrading(ap_mac: str) -> bool:
+def is_ap_actively_upgrading(ap_mac: str, raise_on_error: bool = False) -> bool:
     """
     Check if an AP has an upgrade actively in progress.
 
@@ -2314,7 +2385,7 @@ def is_ap_actively_upgrading(ap_mac: str) -> bool:
         bool: True if upgrade is actively in progress (version mismatch + active progress)
     """
     try:
-        devices = get_devices()
+        devices = get_devices(raise_on_error=raise_on_error)
         for device in devices:
             if device.get("mac", "").lower() == ap_mac.lower():
                 # Check if versions differ
@@ -2332,6 +2403,8 @@ def is_ap_actively_upgrading(ap_mac: str) -> bool:
                 return False
         return False
     except Exception:
+        if raise_on_error:
+            raise
         return False
 
 
