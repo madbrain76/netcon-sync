@@ -51,6 +51,16 @@ class TestPfSenseAPIErrorHandling:
 
         assert exc_info.value.status_code == 503
 
+    def test_pfsense_http_error_summarizes_html_body(self):
+        error = pfsense_utils.PfSenseHTTPError(
+            500,
+            "<html><head><title>50x Error</title></head><body>The web server encountered an error processing this request.</body></html>",
+        )
+
+        assert "HTTP 500" in str(error)
+        assert "50x Error" in str(error)
+        assert "The web server encountered an error processing this request." in str(error)
+
     @patch("pfsense_utils._fetch_dhcp_with_retry")
     @patch("pfsense_utils._ensure_pfsense_config_loaded")
     def test_get_pfsense_dhcp_static_mappings_preserves_transport_error(self, mock_ensure_loaded, mock_fetch):

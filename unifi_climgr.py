@@ -1902,11 +1902,14 @@ def print_action_results_table(clients_data: list, action_type: str, results: di
     """
     # Build display rows
     rows = []
+    success_count = 0
     for client in clients_data:
         mac = client.get("mac", "N/A").lower() if client.get("mac") else "N/A"
         friendly_name = client.get("name") or "Unknown"
         success = results.get(mac, False)
         status_symbol = "OK" if success else "FAIL"
+        if success:
+            success_count += 1
         rows.append({
             "name": friendly_name,
             "mac": mac,
@@ -1935,6 +1938,9 @@ def print_action_results_table(clients_data: list, action_type: str, results: di
         print(data_line)
 
     print("-" * total_width)
+    failure_count = len(rows) - success_count
+    print(f"Successful: {success_count}/{len(rows)}")
+    print(f"Failed:     {failure_count}/{len(rows)}")
     print()
 
 

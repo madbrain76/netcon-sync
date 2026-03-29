@@ -8,8 +8,10 @@ Run with: pytest tests/unit/test_unifi_climgr.py -v
 import pytest
 import sys
 import subprocess
+import io
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
+from contextlib import redirect_stdout
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -267,6 +269,32 @@ class TestUptimeParsing:
 
         result = _parse_uptime_to_seconds("2m")
         assert result == 5184000  # 2*30*86400
+
+
+class TestActionResultFormatting:
+    """Tests for client action result summaries."""
+
+    def test_print_action_results_table_shows_success_failure_counts(self):
+        from unifi_climgr import print_action_results_table
+
+        clients = [
+            {"name": "Phone", "mac": "aa:bb:cc:dd:ee:01"},
+            {"name": "Tablet", "mac": "aa:bb:cc:dd:ee:02"},
+            {"name": "Laptop", "mac": "aa:bb:cc:dd:ee:03"},
+        ]
+        results = {
+            "aa:bb:cc:dd:ee:01": True,
+            "aa:bb:cc:dd:ee:02": False,
+            "aa:bb:cc:dd:ee:03": True,
+        }
+
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            print_action_results_table(clients, "reconnect", results)
+
+        output = buffer.getvalue()
+        assert "Successful: 2/3" in output
+        assert "Failed:     1/3" in output
 
 
 class TestStringFormatting:

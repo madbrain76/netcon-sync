@@ -9,6 +9,7 @@
 
 """pfSense API utilities for DHCP configuration and client management."""
 
+import html
 import json
 import re
 import urllib.error
@@ -36,8 +37,9 @@ class PfSenseHTTPError(PfSenseAPIError):
         self.status_code = status_code
         self.response_body = response_body
         message = f"HTTP {status_code}"
-        if response_body:
-            message += f": {response_body}"
+        body_summary = _summarize_http_error_body(response_body)
+        if body_summary:
+            message += f": {body_summary}"
         super().__init__(message)
 
 
@@ -47,6 +49,27 @@ class PfSenseTransportError(PfSenseAPIError):
     def __init__(self, cause):
         self.cause = cause
         super().__init__(f"Transport error: {cause}")
+
+
+def _summarize_http_error_body(response_body: str, max_length: int = 240) -> str:
+    """Summarize HTTP error bodies so HTML crash pages don't flood the terminal."""
+    if not response_body:
+        return ""
+
+    body = response_body.strip()
+    if not body:
+        return ""
+
+    if "<html" in body.lower():
+        title_match = re.search(r"<title>(.*?)</title>", body, re.IGNORECASE | re.DOTALL)
+        title = html.unescape(title_match.group(1).strip()) if title_match else "HTML error page"
+        text = re.sub(r"<[^>]+>", " ", body)
+        text = html.unescape(re.sub(r"\s+", " ", text)).strip()
+        summary = f"{title}: {text}" if text and title not in text else text or title
+    else:
+        summary = re.sub(r"\s+", " ", body)
+
+    return summary[:max_length] + ("..." if len(summary) > max_length else "")
 
 
 def _ensure_pfsense_config_loaded():
