@@ -1944,7 +1944,7 @@ def print_action_results_table(clients_data: list, action_type: str, results: di
     print()
 
 
-def ping_ap_offline(ap_mac: str, ap_name: str, ap_ip: str, offline_timeout: int = 60) -> dict:
+def ping_ap_offline(ap_mac: str, ap_name: str, ap_ip: str, offline_timeout: int = 180) -> dict:
     """
     Verify an AP forget by waiting for it to stop responding to ping.
 
@@ -1957,7 +1957,7 @@ def ping_ap_offline(ap_mac: str, ap_name: str, ap_ip: str, offline_timeout: int 
         ap_name: Name of the AP
         ap_ip: IP address of the AP
         offline_timeout: Maximum number of seconds to wait for the AP to go
-            offline (default: 60 seconds)
+            offline (default: 180 seconds)
 
     Returns:
         dict with:
@@ -2825,7 +2825,7 @@ AVAILABLE ACTIONS:
                 --actual_forget        Actually perform the forget (default is dry run)
                 --verify_offline       Verify APs are offline before next layer (default)
                 --no_verify_offline    Skip offline verification
-                --offline_timeout <S>  Wait up to S seconds for 10s of no ping replies (default: 60)
+                --offline_timeout <S>  Wait up to S seconds for 10s of no ping replies (default: 180)
               CLIENT FILTERS (for --clients):
                 --filter_online, --filter_offline    Online/offline status
                 --filter_locked, --filter_unlocked   Locked/unlocked status
@@ -2869,7 +2869,7 @@ AVAILABLE ACTIONS:
                 --ap_name <NAME>       Restart AP by name
                 --verify_offline       Verify APs are offline before next layer (default)
                 --no_verify_offline    Skip offline verification
-                --offline_timeout <S>  Wait up to S seconds for 10s of no ping replies (default: 60)
+                --offline_timeout <S>  Wait up to S seconds for 10s of no ping replies (default: 180)
               If neither --ap_mac nor --ap_name is specified, restarts all APs (use with caution!)
               APs restart in mesh order (leaf to parent), and each layer must go offline
               before the next layer is processed unless verification is disabled.
@@ -3341,8 +3341,8 @@ EXAMPLES:
     forget_parser.add_argument(
         '--offline_timeout',
         type=int,
-        default=60,
-        help='Maximum seconds to wait for AP to stay offline for 10s (default: 60)'
+        default=180,
+        help='Maximum seconds to wait for AP to stay offline for 10s (default: 180)'
     )
     add_filter_arguments(forget_parser)
     forget_parser.add_argument(
@@ -3409,8 +3409,8 @@ EXAMPLES:
     restart_ap_parser.add_argument(
         '--offline_timeout',
         type=int,
-        default=60,
-        help='Maximum seconds to wait for AP to stay offline for 10s (default: 60)'
+        default=180,
+        help='Maximum seconds to wait for AP to stay offline for 10s (default: 180)'
     )
 
  
