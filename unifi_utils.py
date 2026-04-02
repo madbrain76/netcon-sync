@@ -62,7 +62,7 @@ def _get_opener():
     """Get or create the global URL opener."""
     global _opener
     if _opener is None:
-        _opener = NSPRNSSURLOpener()
+        _opener = NSPRNSSURLOpener(connect_host=__import__('os').environ.get("UNIFI_NETWORK_CONNECT_HOST"))
     return _opener
 
 

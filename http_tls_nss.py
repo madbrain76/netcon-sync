@@ -113,10 +113,9 @@ class SocketWrapper:
         return getattr(self._sock, name)
 
 
-def _create_nss_socket(hostname, port, use_tls):
-    """Create an NSS/NSPR socket."""
-    # Resolve hostname
-    addr_info = nss.io.AddrInfo(hostname)
+def _resolve_net_addr(connect_host, port):
+    """Resolve a connect target to an NSS network address."""
+    addr_info = nss.io.AddrInfo(connect_host)
     net_addrs = list(addr_info)
 
     net_addr = None
@@ -128,9 +127,29 @@ def _create_nss_socket(hostname, port, use_tls):
         net_addr = net_addrs[0]
 
     if net_addr is None:
-        raise RuntimeError(f"Could not resolve {hostname}")
+        raise RuntimeError(f"Could not resolve {connect_host}")
 
     net_addr.port = port
+    return net_addr
+
+
+def _verify_server_certificate(sock, expected_hostname, check_sig):
+    """Verify the peer certificate against the configured NSS DB and hostname."""
+    try:
+        peer_cert = sock.get_peer_certificate()
+        if peer_cert is None:
+            return False
+
+        certdb = nss.nss.get_default_certdb()
+        peer_cert.verify_now(certdb, check_sig, nss.nss.certificateUsageSSLServer)
+        return peer_cert.verify_hostname(expected_hostname)
+    except Exception:
+        return False
+
+
+def _create_nss_socket(hostname, port, use_tls, connect_host=None, auth_certificate_callback=None):
+    """Create an NSS/NSPR socket."""
+    net_addr = _resolve_net_addr(connect_host or hostname, port)
 
     if use_tls:
         # Create and configure NSS socket first, then connect
@@ -138,9 +157,12 @@ def _create_nss_socket(hostname, port, use_tls):
         nss_socket.set_hostname(hostname)
         nss_socket.set_ssl_option(nss.ssl.SSL_SECURITY, True)
         nss_socket.set_ssl_option(nss.ssl.SSL_HANDSHAKE_AS_CLIENT, True)
+        nss_socket.set_auth_certificate_callback(
+            auth_certificate_callback
+            or (lambda sock, check_sig, is_server: _verify_server_certificate(sock, hostname, check_sig))
+        )
 
         # TLS handshake happens during connect
-        # NSS automatically validates certificates against trusted CAs in the database
         nss_socket.connect(net_addr)
         return nss_socket
     else:
@@ -165,6 +187,7 @@ class _NSHTTPSConnection(http.client.HTTPSConnection):
         # Remove SSL kwargs and call parent without them
         kwargs.pop('context', None)
         kwargs.pop('check_hostname', None)
+        self._connect_host = kwargs.pop('connect_host', None)
         # Call HTTPConnection init, skip HTTPSConnection's SSL setup
         http.client.HTTPConnection.__init__(self, host, port, **kwargs)
         if self.port is None:
@@ -172,7 +195,7 @@ class _NSHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self):
         """Connect using NSS socket instead of stdlib SSL."""
-        nss_socket = _create_nss_socket(self.host, self.port, use_tls=True)
+        nss_socket = _create_nss_socket(self.host, self.port, use_tls=True, connect_host=self._connect_host)
         self.sock = SocketWrapper(nss_socket)
 
 
@@ -188,6 +211,7 @@ class _NSHTTPConnection(http.client.HTTPConnection):
             except ValueError:
                 pass  # Keep as-is if not a valid port
 
+        self._connect_host = kwargs.pop('connect_host', None)
         # Call parent init
         http.client.HTTPConnection.__init__(self, host, port, **kwargs)
         if self.port is None:
@@ -195,22 +219,30 @@ class _NSHTTPConnection(http.client.HTTPConnection):
 
     def connect(self):
         """Connect using NSPR socket."""
-        nss_socket = _create_nss_socket(self.host, self.port, use_tls=False)
+        nss_socket = _create_nss_socket(self.host, self.port, use_tls=False, connect_host=self._connect_host)
         self.sock = SocketWrapper(nss_socket)
 
 
 class _CustomHTTPSHandler(urllib.request.HTTPSHandler):
     """HTTPS handler using NSS connection class."""
 
+    def __init__(self, connect_host=None):
+        super().__init__()
+        self.connect_host = connect_host
+
     def https_open(self, req):
-        return self.do_open(_NSHTTPSConnection, req)
+        return self.do_open(lambda host, **kwargs: _NSHTTPSConnection(host, connect_host=self.connect_host, **kwargs), req)
 
 
 class _CustomHTTPHandler(urllib.request.HTTPHandler):
     """HTTP handler using NSPR connection class."""
 
+    def __init__(self, connect_host=None):
+        super().__init__()
+        self.connect_host = connect_host
+
     def http_open(self, req):
-        return self.do_open(_NSHTTPConnection, req)
+        return self.do_open(lambda host, **kwargs: _NSHTTPConnection(host, connect_host=self.connect_host, **kwargs), req)
 
 
 class NSPRNSSURLOpener:
@@ -222,14 +254,14 @@ class NSPRNSSURLOpener:
     All HTTP protocol handling (headers, redirects, etc.) is unchanged.
     """
 
-    def __init__(self):
+    def __init__(self, connect_host=None):
         """Initialize opener with NSS connection classes and cookie jar."""
         # Create a cookie jar to preserve session state
         self.cookie_jar = http.cookiejar.CookieJar()
 
         # Create handlers that use our NSS connection classes
-        https_handler = _CustomHTTPSHandler()
-        http_handler = _CustomHTTPHandler()
+        https_handler = _CustomHTTPSHandler(connect_host=connect_host)
+        http_handler = _CustomHTTPHandler(connect_host=connect_host)
         cookie_handler = urllib.request.HTTPCookieProcessor(self.cookie_jar)
 
         # build_opener() includes all default processors plus our custom ones
@@ -362,22 +394,7 @@ def get_server_certificate(hostname, port=443):
             return True
 
     try:
-        # Resolve hostname
-        addr_info = nss.io.AddrInfo(hostname)
-        net_addrs = list(addr_info)
-
-        net_addr = None
-        for addr in net_addrs:
-            if addr.family == nss.io.PR_AF_INET:
-                net_addr = addr
-                break
-        if net_addr is None and net_addrs:
-            net_addr = net_addrs[0]
-
-        if net_addr is None:
-            raise RuntimeError(f"Could not resolve {hostname}")
-
-        net_addr.port = port
+        net_addr = _resolve_net_addr(hostname, port)
 
         # Create and configure NSS socket
         nss_socket = nss.ssl.SSLSocket(net_addr.family)
